@@ -1,0 +1,23 @@
+{
+  "name": "mchatbot",
+  "version": "1.0.0",
+  "description": "Minecraft bot with HTTP API for astrbot integration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "mineflayer": "^4.37.1"
+  }
+}

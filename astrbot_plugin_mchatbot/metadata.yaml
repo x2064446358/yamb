@@ -1,0 +1,5 @@
+name: astrbot_plugin_mchatbot
+desc: Minecraft传送机器人插件，支持QQ群命令控制Minecraft机器人
+version: 1.0.0
+author: mchatbot
+repo: ""
