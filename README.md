@@ -6,46 +6,21 @@
 
 ## 功能概览
 
-- **命令渠道**：私聊无前缀；公屏需配置前缀（默认见 `command.json`）
+- **命令渠道**：私聊无前缀；公屏需在`command.json`配置前缀
 - **权限**：SQLite 白名单 + `.env` 管理员列表
-- **传送**：自动接受白名单 `/tpa`、`/tpahere`；`phome` 经传送点拉人；锁定模式
-- **交互**：骑乘玩家（可切换目标、非主动脱离自动重骑）、矿车上车、攻击
-- **物品**：容器登记、`store`/`take` 存取、`drop` 丢弃、管理员 `inv` 查背包
-- **待命**：超时自动 `/home`、吃金胡萝卜、`/afk`
-- **Viewer**：可选 `prismarine-viewer` 网页可视化（需 `canvas`）
-- **酿造**：占位模块，待实现
+- **传送**：自动接受传送、传送点、锁定
+- **交互**：骑乘玩家、上车、攻击、（WIP）亲亲
+- **物品**：容器登记、存取、丢弃、查背包
+- **待命**：自动回家、吃饭、闲置
+- **AstrBot**（可选）：提供 QQ 机器人接口
+- **Viewer**（可选）： `prismarine-viewer` 网页可视化
+- （WIP）**酿造**：占位模块，待实现
+- （WIP）**多用户**：自由切换账号和对应配置。
+- （WIP）**哈气模式**
+- （WIP）**远程存取**
+- （WIP）**互动回应**
 
-## 目录结构
 
-```
-yamb/
-├── src/
-│   ├── index.ts                 # 启动与模块组装
-│   ├── config/loader.ts         # 加载 .env 与 config/game/*
-│   ├── types/
-│   ├── platform/                # Mineflayer 封装、数据库、消息队列
-│   ├── permissions/             # 白名单
-│   ├── actions/                 # 原子动作（玩家交互、矿车、背包/容器）
-│   ├── features/                # 业务模块
-│   │   ├── commands/            # 命令流程（解析 → 鉴权 → 调度）
-│   │   ├── teleport/
-│   │   ├── container/
-│   │   ├── riding/              # 骑乘状态与重骑
-│   │   ├── standby/
-│   │   ├── viewer/
-│   │   └── brew/                # 占位
-│   └── api/                     # AstrBot HTTP API
-├── integrations/
-│   └── astrbot-plugin/          # AstrBot Python 插件
-├── config/game/                 # 游戏内配置（支持 // 注释）
-└── data/                        # 运行时 SQLite（gitignore）
-```
-
-**设计原则**
-
-- `actions/`：单个游戏动作，可复用
-- `features/commands/`：完整指令流程
-- `config/game/messages.json`：命令回复文案
 
 ## 安装
 
@@ -122,6 +97,8 @@ yarn add canvas
 3. 配置插件中的 API 地址与密钥
 
 HTTP 路由见 `src/api/routes/`。
+
+
 
 ## 许可证
 
