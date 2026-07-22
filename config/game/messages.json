@@ -6,7 +6,7 @@
   "phomeError": "失败: {message}",
   "lockedBlocked": "bot 已被 {lockedBy} 锁定",
   "lockAlready": "已处于锁定状态",
-  "lockSuccess": "已锁定，仅接受 /tpa 请求",
+  "lockSuccess": "已锁定，仅接受 /tpa 与文本回复",
   "unlockNotLocked": "当前未锁定",
   "unlockSuccess": "已解锁",
   "addUsage": "用法: add <游戏名>",

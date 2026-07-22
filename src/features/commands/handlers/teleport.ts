@@ -31,7 +31,7 @@ export async function handleLock (
     await ctx.reply(username, ctx.messages.text('lockAlready'), source)
     return
   }
-  ctx.teleportService.lock(username)
+  await ctx.teleportService.prepareAndLock(username)
   await ctx.reply(username, ctx.messages.text('lockSuccess'), source)
 }
 

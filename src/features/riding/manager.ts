@@ -17,6 +17,8 @@ type Entity = NonNullable<Bot['entities'][string]>
 export default class RidingManager {
   private mcBot: MinecraftBot
   private playerInteraction: PlayerInteractionService
+  private isLocked: () => boolean = () => false
+  private onBehaviorEnd: (() => void) | null = null
   private homeCommand: string
   private checkIntervalMs: number
   private mode: RidingMode = 'idle'
@@ -38,6 +40,14 @@ export default class RidingManager {
     this.checkIntervalMs = botConfig.ridingCheckIntervalMs ?? 1500
   }
 
+  setIsLocked (isLocked: () => boolean): void {
+    this.isLocked = isLocked
+  }
+
+  setOnBehaviorEnd (onBehaviorEnd: () => void): void {
+    this.onBehaviorEnd = onBehaviorEnd
+  }
+
   getMode (): RidingMode {
     return this.mode
   }
@@ -51,6 +61,10 @@ export default class RidingManager {
   }
 
   enterPlayerMode (playerName: string): void {
+    if (this.isLocked()) {
+      console.warn('[Riding] 已锁定，拒绝进入骑乘模式')
+      return
+    }
     this.mode = 'player'
     this.targetPlayer = playerName
     this.dismountRequested = false
@@ -59,6 +73,10 @@ export default class RidingManager {
   }
 
   enterMinecartMode (): void {
+    if (this.isLocked()) {
+      console.warn('[Riding] 已锁定，拒绝进入矿车模式')
+      return
+    }
     this.mode = 'minecart'
     this.targetPlayer = null
     this.dismountRequested = false
@@ -176,6 +194,14 @@ export default class RidingManager {
     this.handlingDismount = true
 
     try {
+      // 锁定期间不重骑、不回家，仅退出骑乘模式并 AFK
+      if (this.isLocked()) {
+        console.log('[Riding] 已锁定，跳过重骑/回家')
+        this.clearMode()
+        this.onBehaviorEnd?.()
+        return
+      }
+
       if (this.mode === 'player' && this.targetPlayer) {
         await this.handlePlayerRemount(this.targetPlayer)
         return
@@ -193,6 +219,13 @@ export default class RidingManager {
     const bot = this.mcBot.bot
     if (!bot) {
       this.clearMode()
+      return
+    }
+
+    if (this.isLocked()) {
+      console.log('[Riding] 已锁定，跳过重骑/回家')
+      this.clearMode()
+      this.onBehaviorEnd?.()
       return
     }
 

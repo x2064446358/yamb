@@ -11,6 +11,8 @@ export default class TeleportService {
   private waypointDelayMs: number
   private locked = false
   private lockedBy: string | null = null
+  private beforeLock: (() => Promise<void>) | null = null
+  private onLock: (() => void) | null = null
 
   constructor (mcBot: MinecraftBot, config: TeleportConfig) {
     this.mcBot = mcBot
@@ -23,6 +25,15 @@ export default class TeleportService {
     this.waypointDelayMs = config.waypointDelayMs ?? 3000
   }
 
+  /** 锁定前钩子（例如骑乘时先下马，保证空闲/骑乘/锁定互斥） */
+  setBeforeLock (beforeLock: () => Promise<void>): void {
+    this.beforeLock = beforeLock
+  }
+
+  setOnLock (onLock: () => void): void {
+    this.onLock = onLock
+  }
+
   isLocked (): boolean {
     return this.locked
   }
@@ -31,9 +42,17 @@ export default class TeleportService {
     return this.lockedBy
   }
 
+  /** 进入锁定：先执行 beforeLock，再置锁定状态 */
+  async prepareAndLock (by: string): Promise<void> {
+    if (this.locked) return
+    if (this.beforeLock) await this.beforeLock()
+    this.lock(by)
+  }
+
   lock (by: string): void {
     this.locked = true
     this.lockedBy = by
+    this.onLock?.()
     console.log(`[Teleport] Locked by ${by}`)
   }
 

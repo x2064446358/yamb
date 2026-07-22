@@ -8,6 +8,11 @@ export async function handleMount (
   target: string | undefined,
   source: CommandSource
 ): Promise<void> {
+  if (ctx.teleportService.isLocked()) {
+    await ctx.notifyLocked(username, source)
+    return
+  }
+
   const targetName = target?.trim() || username
   const currentTarget = ctx.ridingManager.getTargetPlayer()
 
@@ -50,6 +55,11 @@ export async function handleCart (
   username: string,
   source: CommandSource
 ): Promise<void> {
+  if (ctx.teleportService.isLocked()) {
+    await ctx.notifyLocked(username, source)
+    return
+  }
+
   const ridingTarget = ctx.ridingManager.getTargetPlayer()
   if (
     ctx.ridingManager.getMode() === 'player' &&
