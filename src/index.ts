@@ -20,6 +20,7 @@ import { registerChatListeners } from './features/commands/listeners'
 import BrewModule from './features/brew'
 import AstrbotServer from './api/server'
 import { sleep } from './platform/sleep'
+import { resumeBotPhysics } from './actions/shared/entity-utils'
 
 async function main (): Promise<void> {
   const config = loadConfig()
@@ -72,6 +73,11 @@ async function main (): Promise<void> {
     await sleep(400)
   })
   teleportService.setOnLock(() => standbyManager.scheduleAfk())
+  teleportService.setOnUnlock(({ wasHover }) => {
+    if (wasHover && mcBot.bot) {
+      resumeBotPhysics(mcBot.bot)
+    }
+  })
 
   standbyManager.setRidingManager(ridingManager)
   standbyManager.setIsLocked(isLocked)

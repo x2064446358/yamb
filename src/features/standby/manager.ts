@@ -66,13 +66,26 @@ export default class StandbyManager {
     }
   }
 
-  scheduleAfk (): void {
+  scheduleAfk (attempt = 0): void {
     if (this.afkTimer) clearTimeout(this.afkTimer)
+    const delay = attempt === 0 ? this.afkDelayMs : 1000
     this.afkTimer = setTimeout(() => {
+      const bot = this.mcBot.bot
+      // 骑乘时 onGround 恒为 false，应照常 AFK；仅意外半空时推迟
+      const riding = this.ridingManager?.isActive() ?? false
+      if (bot && !bot.entity.onGround && !riding && !this.isLocked()) {
+        if (attempt >= 10) {
+          console.log('[Standby] 多次未落地，放弃本次 AFK')
+          return
+        }
+        console.log(`[Standby] 未落地，推迟 AFK (${attempt + 1}/10)`)
+        this.scheduleAfk(attempt + 1)
+        return
+      }
       if (this.mcBot.chat(this.afkCommand)) {
         console.log(`[Standby] 执行 ${this.afkCommand}`)
       }
-    }, this.afkDelayMs)
+    }, delay)
   }
 
   private async checkIdle (): Promise<void> {

@@ -239,7 +239,7 @@ export default class CommandHandler {
         await handleContainer(ctx, username, parts, source)
         break
       case 'lock':
-        await handleLock(ctx, username, source)
+        await handleLock(ctx, username, parts[0], source)
         break
       case 'unlock':
         await handleUnlock(ctx, username, source)

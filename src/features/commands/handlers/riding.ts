@@ -26,12 +26,19 @@ export async function handleMount (
   }
 
   if (ctx.ridingManager.isActive()) {
-    await ctx.ridingManager.dismount()
+    const dismounted = await ctx.ridingManager.dismount()
+    if (!dismounted.success) {
+      await ctx.reply(username, ctx.messages.text('unmountError', {
+        message: dismounted.message || '下马失败'
+      }), source)
+      return
+    }
     await sleep(400)
   }
 
   const result = await ctx.playerInteraction.mount(targetName)
-  if (result.success && ctx.playerInteraction.isMountedOn(targetName)) {
+  // mount() 已确认成功则进入骑乘模式；勿再二次检测挡住状态切换
+  if (result.success) {
     ctx.ridingManager.enterPlayerMode(targetName)
   }
   await ctx.reply(username, result.success
@@ -44,6 +51,7 @@ export async function handleUnmount (
   username: string,
   source: CommandSource
 ): Promise<void> {
+  ctx.standby.cancelAfk()
   const result = await ctx.ridingManager.dismount()
   await ctx.reply(username, result.success
     ? ctx.messages.text('unmountSuccess', { message: result.message })
