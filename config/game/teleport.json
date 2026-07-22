@@ -1,6 +1,6 @@
 {
   // SQLite 数据库路径（白名单、容器记录）
-  "databaseFile": "./data/mchatbot.db",
+  "databaseFile": "./data/db.db",
   // 接受传送请求的指令
   "tpacceptCommand": "/tpaccept",
   // 拉取玩家到 bot 位置的指令

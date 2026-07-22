@@ -172,7 +172,7 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       messages
     },
     teleport: {
-      databaseFile: teleportConfig.databaseFile || './data/mchatbot.db',
+      databaseFile: teleportConfig.databaseFile || './data/db.db',
       tpacceptCommand: teleportConfig.tpacceptCommand || '/tpaccept',
       tpahereCommand: teleportConfig.tpahereCommand || '/tpahere',
       phomeCommand: teleportConfig.phomeCommand || '/phome',
