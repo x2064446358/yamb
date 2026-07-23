@@ -15,6 +15,7 @@ export default class MinecraftBot {
   private messageQueue: MessageQueue | null = null
   private onSpawnCallbacks: Array<(bot: MinecraftBot) => void> = []
   private whisperCommand = '/msg'
+  private reconnecting = false
 
   constructor (config: MinecraftConfig, whisperCommand = '/msg') {
     this.config = config
@@ -245,29 +246,46 @@ export default class MinecraftBot {
   }
 
   private _handleReconnect (reason: string): void {
+    if (this.reconnecting) return
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.log(`[MC] 已达到最大重连次数 (${this.maxReconnectAttempts})，停止重连`)
       return
     }
 
+    this.reconnecting = true
     this.reconnectAttempts++
     const delay = reason.includes('spam') ? 30000 : this.reconnectDelay
     console.log(`[MC] ${reason} - 第 ${this.reconnectAttempts}/${this.maxReconnectAttempts} 次重连，等待 ${delay / 1000} 秒...`)
 
+    this._cleanupBot()
+
     setTimeout(() => {
       console.log('[MC] Reconnecting...')
+      this.reconnecting = false
       this.create()
     }, delay)
   }
 
+  private _cleanupBot (): void {
+    if (!this.bot) return
+    try {
+      this.bot.removeAllListeners()
+      this.bot.quit()
+    } catch {
+      // ignore cleanup errors
+    }
+    this.bot = null
+    this.isReady = false
+  }
+
   chat (message: string): boolean {
-    if (!this.isReady || !this.bot) return false
+    if (!this.isReady || !this.bot || this.reconnecting) return false
     this.bot.chat(message)
     return true
   }
 
   whisper (username: string, message: string): boolean {
-    if (!this.isReady || !this.bot) return false
+    if (!this.isReady || !this.bot || this.reconnecting) return false
     this.bot.chat(`${this.whisperCommand} ${username} ${message}`)
     return true
   }

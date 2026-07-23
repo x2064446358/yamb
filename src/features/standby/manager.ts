@@ -5,6 +5,9 @@ import { sleep } from '../../platform/sleep'
 
 import type RidingManager from '../riding/manager'
 
+const BACKOFF_MAX = 6
+const MOVEMENT_THRESHOLD = 1.5
+
 export default class StandbyManager {
   private mcBot: MinecraftBot
   private ridingManager: RidingManager | null = null
@@ -19,6 +22,7 @@ export default class StandbyManager {
   private checkTimer: ReturnType<typeof setInterval> | null = null
   private afkTimer: ReturnType<typeof setTimeout> | null = null
   private goingHome = false
+  private consecutiveFailures = 0
 
   constructor (mcBot: MinecraftBot, config: BotBehaviorConfig) {
     this.mcBot = mcBot
@@ -97,7 +101,8 @@ export default class StandbyManager {
       return
     }
     if (this.ridingManager?.isActive()) return
-    if (Date.now() - this.lastActivity < this.idleTimeoutMs) return
+    const effectiveTimeout = this.idleTimeoutMs * Math.pow(2, Math.min(this.consecutiveFailures, BACKOFF_MAX))
+    if (Date.now() - this.lastActivity < effectiveTimeout) return
     await this.goHomeStandby()
   }
 
@@ -109,13 +114,13 @@ export default class StandbyManager {
     }
 
     this.goingHome = true
-    console.log(`[Standby] 超过 ${this.idleTimeoutMs / 1000}s 无互动，执行 ${this.homeCommand}`)
+    const backoffSec = (this.idleTimeoutMs * Math.pow(2, Math.min(this.consecutiveFailures, BACKOFF_MAX))) / 1000
+    console.log(`[Standby] 超过 ${backoffSec}s 无互动，执行 ${this.homeCommand}`)
 
     try {
-      if (this.isLocked()) {
-        this.scheduleAfk()
-        return
-      }
+      const bot = this.mcBot.bot
+      const posBefore = bot.entity.position.clone()
+
       this.mcBot.chat(this.homeCommand)
       await sleep(this.homeWaitMs)
 
@@ -124,12 +129,20 @@ export default class StandbyManager {
         return
       }
 
-      if (this.mcBot.bot) {
-        await eatGoldenCarrotsUntilFull(this.mcBot.bot)
-      }
+      const botAfter = this.mcBot.bot
+      if (!botAfter) return
 
-      this.scheduleAfk()
-      this.touch()
+      const moved = posBefore.distanceTo(botAfter.entity.position) > MOVEMENT_THRESHOLD
+
+      if (moved) {
+        this.consecutiveFailures = 0
+        await eatGoldenCarrotsUntilFull(botAfter)
+        this.scheduleAfk()
+        this.touch()
+      } else {
+        this.consecutiveFailures++
+        console.warn(`[Standby] /home 未生效 (${this.consecutiveFailures} 次失败)，跳过待命流程`)
+      }
     } catch (err) {
       console.error('[Standby] 回家待命失败:', (err as Error).message)
     } finally {
