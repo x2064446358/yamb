@@ -1,3 +1,4 @@
+import { Vec3 } from 'vec3'
 import type { Bot } from 'mineflayer'
 import { pathfinder, Movements, goals } from 'mineflayer-pathfinder'
 import type { ServiceResult } from '../../types'
@@ -82,34 +83,34 @@ export function isOnPluginCloudSeat (bot: Bot): boolean {
   return horizontal < 0.75
 }
 
-function isLockedToPlayerEntity (bot: Bot, player: Entity): boolean {
-  const horizontal = Math.hypot(
-    bot.entity.position.x - player.position.x,
-    bot.entity.position.z - player.position.z
-  )
-  const dy = bot.entity.position.y - player.position.y
-  // 骑乘日志：horiz≈0、dy≈0.2；未骑乘时 horiz 通常 >1
-  return horizontal < 0.75 && dy >= -0.25 && dy <= 1.25
+/** 是否仍挂在"有效载具"上（忽略未对齐的残留 AEC 引用） */
+export function hasActiveVehicle (bot: Bot): boolean {
+  const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
+  if (!vehicle) return false
+  if (isAreaEffectCloudEntity(vehicle)) return isOnPluginCloudSeat(bot)
+  return true
 }
 
 export function isMountedOnPlayer (bot: Bot, playerName: string): boolean {
   const player = getPlayerEntity(bot, playerName)
   if (!player) return false
 
+  const horizontal = Math.hypot(
+    bot.entity.position.x - player.position.x,
+    bot.entity.position.z - player.position.z
+  )
+  const dy = bot.entity.position.y - player.position.y
+  const physicallyRiding = horizontal < 1.8 && dy >= -0.5 && dy <= 2.5
+
+  if (physicallyRiding) return true
+
   const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
-  if (vehicle && (vehicle === player || vehicle.username === playerName)) {
-    return true
-  }
+  if (!vehicle) return false
 
-  // 本服坐骑插件：必须同时「锁在玩家 xz」且「坐在对齐的 AEC 云上」
-  // 注意：下马后常会短暂悬空（!onGround），不能再用悬空当骑乘依据，否则会误判失败并卡在半空
-  if (!isLockedToPlayerEntity(bot, player)) return false
-  return isOnPluginCloudSeat(bot)
-}
+  const onPlayer = vehicle === player || vehicle.username === playerName
+  if (!onPlayer) return false
 
-/** 主动下马后的确认 */
-export function isStillRidingPlayer (bot: Bot, playerName: string): boolean {
-  return isMountedOnPlayer(bot, playerName)
+  return horizontal < 2.5 && dy >= -1 && dy <= 3
 }
 
 export function isMountedOnMinecart (bot: Bot): boolean {
@@ -118,12 +119,47 @@ export function isMountedOnMinecart (bot: Bot): boolean {
   return entityDistance(bot, vehicle) < 2.5
 }
 
-/** 是否仍挂在“有效载具”上（忽略未对齐的残留 AEC 引用） */
-export function hasActiveVehicle (bot: Bot): boolean {
-  const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
-  if (!vehicle) return false
-  if (isAreaEffectCloudEntity(vehicle)) return isOnPluginCloudSeat(bot)
-  return true
+/** 离开插件 AEC 坐骑：以潜行为主（bot.dismount 对此类载具常报 not mounted） */
+export async function leavePluginSeat (bot: Bot): Promise<boolean> {
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    bot.setControlState('sneak', true)
+    await sleep(attempt <= 2 ? 450 : 650)
+
+    try {
+      bot.dismount()
+    } catch {
+      // 插件云座下 mineflayer 常抛 dismount: not mounted，忽略即可
+    }
+
+    bot.setControlState('sneak', false)
+    bot.clearControlStates()
+    clearVehicleState(bot)
+    await sleep(250)
+
+    if (!hasActiveVehicle(bot) && !isOnPluginCloudSeat(bot)) {
+      console.log(`[Riding] 已离开云座 (第 ${attempt} 次潜行)`)
+      resumeBotPhysics(bot)
+      return true
+    }
+  }
+
+  clearVehicleState(bot)
+  resumeBotPhysics(bot)
+  return !hasActiveVehicle(bot) && !isOnPluginCloudSeat(bot)
+}
+
+export async function performDismount (
+  bot: Bot,
+  isStillMounted?: () => boolean
+): Promise<boolean> {
+  const leftSeat = await leavePluginSeat(bot)
+  const stillMounted = isStillMounted?.() ?? false
+
+  await waitForNaturalLanding(bot)
+
+  if (leftSeat && !stillMounted) return true
+  if (!hasActiveVehicle(bot) && !(isStillMounted?.() ?? false)) return true
+  return false
 }
 
 /**
@@ -213,56 +249,46 @@ export async function waitForNaturalLanding (bot: Bot, timeoutMs = 3000): Promis
   return bot.entity.onGround
 }
 
-/** @deprecated 使用 waitForNaturalLanding */
-export async function forceLand (bot: Bot): Promise<void> {
-  await waitForNaturalLanding(bot)
-}
+export async function settleOnGround (bot: Bot): Promise<void> {
+  bot.clearControlStates()
 
-/** 离开插件 AEC 坐骑：以潜行为主（bot.dismount 对此类载具常报 not mounted） */
-export async function leavePluginSeat (bot: Bot): Promise<boolean> {
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    bot.setControlState('sneak', true)
-    await sleep(attempt <= 2 ? 450 : 650)
+  for (let i = 0; i < 15; i++) {
+    await sleep(100)
+    if (bot.entity.onGround) return
+  }
 
-    try {
-      bot.dismount()
-    } catch {
-      // 插件云座下 mineflayer 常抛 dismount: not mounted，忽略即可
-    }
+  const pos = bot.entity.position
+  const feetX = Math.floor(pos.x)
+  const feetZ = Math.floor(pos.z)
+  let standY: number | null = null
 
-    bot.setControlState('sneak', false)
-    bot.clearControlStates()
-    clearVehicleState(bot)
-    await sleep(250)
-
-    if (!hasActiveVehicle(bot) && !isOnPluginCloudSeat(bot)) {
-      console.log(`[Riding] 已离开云座 (第 ${attempt} 次潜行)`)
-      resumeBotPhysics(bot)
-      return true
+  for (let y = Math.floor(pos.y); y >= Math.floor(pos.y) - 8; y--) {
+    const block = bot.blockAt(new Vec3(feetX, y, feetZ))
+    if (block && block.name !== 'air' && block.name !== 'water' && block.name !== 'lava') {
+      standY = y + 1
+      break
     }
   }
 
-  clearVehicleState(bot)
-  resumeBotPhysics(bot)
-  return !hasActiveVehicle(bot) && !isOnPluginCloudSeat(bot)
-}
+  if (standY != null) {
+    const pfBot = ensurePathfinder(bot)
+    try {
+      await pfBot.pathfinder.goto(new goals.GoalNear(feetX + 0.5, standY, feetZ + 0.5, 0.8))
+      await sleep(300)
+    } catch {
+      pfBot.pathfinder.stop()
+    }
+  }
 
-export async function performDismount (
-  bot: Bot,
-  isStillMounted?: () => boolean
-): Promise<boolean> {
-  const leftSeat = await leavePluginSeat(bot)
-  const stillMounted = isStillMounted?.() ?? false
-
-  await waitForNaturalLanding(bot)
-
-  if (leftSeat && !stillMounted) return true
-  if (!hasActiveVehicle(bot) && !(isStillMounted?.() ?? false)) return true
-  return false
-}
-
-export async function settleOnGround (bot: Bot): Promise<void> {
-  await waitForNaturalLanding(bot)
+  bot.clearControlStates()
+  for (let i = 0; i < 8; i++) {
+    if (bot.entity.onGround) return
+    bot.setControlState('forward', true)
+    await sleep(120)
+    bot.setControlState('forward', false)
+    await sleep(120)
+  }
+  bot.clearControlStates()
 }
 
 export async function approachEntity (

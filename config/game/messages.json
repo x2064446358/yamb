@@ -1,14 +1,14 @@
 {
-  "emptyCommand": "输入 help 查看帮助（私聊无需前缀）",
-  "unknownCommand": "未知命令: {cmd}，输入 help 查看帮助",
+  "emptyCommand": "私聊无需前缀，公屏需 {prefix}（若已开启）",
+  "unknownCommand": "未知命令: {cmd}",
   "noPermission": "你没有权限执行此命令",
   "phomeUsage": "用法: phome <传送点>\n可用传送点: {waypoints}",
   "phomeError": "失败: {message}",
-  "lockedBlocked": "bot 已被 {lockedBy} 锁定",
+  "lockedBlocked": "已锁定，仅接受 /tpa和/tpahere 请求",
   "lockAlready": "已处于锁定状态",
-  "lockUsage": "用法: lock 或 lock hover",
-  "lockSuccess": "已锁定，仅接受 /tpa 与文本回复",
-  "lockHoverSuccess": "已滞空锁定，仅接受 /tpa 与文本回复",
+  "lockUsage": "用法: 锁定 或 锁定 滞空",
+  "lockSuccess": "已锁定，仅接受 /tpa和/tpahere 请求",
+  "lockHoverSuccess": "已滞空锁定",
   "lockHoverFailed": "滞空失败，未进入锁定",
   "unlockNotLocked": "当前未锁定",
   "unlockSuccess": "已解锁",
@@ -65,20 +65,5 @@
   "takeError": "失败: {message}",
   "dropUsage": "用法: drop <物品> [数量]",
   "dropSuccess": "{message}",
-  "dropError": "失败: {message}",
-  "helpLines": [
-    "游戏内命令帮助",
-    "私聊命令无需前缀；公屏需 {prefix}（若已开启）",
-    "phome <传送点> — 传送 ({waypoints})",
-    "mount [游戏名] / unmount — 骑乘/下马",
-    "cart — 登上最近矿车",
-    "attack [游戏名] — 攻击目标",
-    "store/take <容器> <物品> [数量] — 存取物品",
-    "drop <物品> [数量] — 丢弃物品",
-    "lock / lock hover / unlock — 锁定 / 滞空锁定 / 解锁",
-    "container add|list|info|remove — 容器管理",
-    "status — 查看状态",
-    "inv — 查看背包 (管理员)",
-    "forward / say / add / remove — 管理员"
-  ]
+  "dropError": "失败: {message}"
 }

@@ -2,7 +2,6 @@ import mineflayer, { Bot, BotOptions } from 'mineflayer'
 import type { MinecraftConfig } from '../types'
 import type MessageQueue from './message-queue'
 import { getBotClient } from './bot-client'
-import { resumeBotPhysics } from '../actions/shared/entity-utils'
 
 export default class MinecraftBot {
   config: MinecraftConfig
@@ -10,12 +9,11 @@ export default class MinecraftBot {
   isReady = false
   private acceptedResourcePacks = new Set<string>()
   private reconnectAttempts = 0
-  private readonly maxReconnectAttempts = 10
-  private readonly reconnectDelay = 5000
+  private readonly reconnectDelay = 20000
+  private reconnectScheduled = false
   private messageQueue: MessageQueue | null = null
   private onSpawnCallbacks: Array<(bot: MinecraftBot) => void> = []
   private whisperCommand = '/msg'
-  private reconnecting = false
 
   constructor (config: MinecraftConfig, whisperCommand = '/msg') {
     this.config = config
@@ -43,7 +41,6 @@ export default class MinecraftBot {
       keepAlive: true,
       skipValidation: true,
       hideErrors: true,
-      physicsEnabled: true,
       ...(this.config.version !== false ? { version: this.config.version } : {})
     } as BotOptions
 
@@ -73,9 +70,7 @@ export default class MinecraftBot {
     this.bot.on('spawn', () => {
       console.log('[MC] Bot spawned in world')
       this.isReady = true
-      this.reconnectAttempts = 0
-      this.bot!.physicsEnabled = true
-
+      this.reconnectScheduled = false
       if (this.messageQueue) {
         this.messageQueue.setBot(this)
       }
@@ -85,20 +80,12 @@ export default class MinecraftBot {
       }
     })
 
-    // mount 会暂停物理；dismount 后 mineflayer 不会自动恢复，需手动打开
-    this.bot.on('dismount', () => {
-      console.log('[MC] dismount → 恢复物理')
-      resumeBotPhysics(this.bot!)
-    })
-
-    this.bot.on('mount', () => {
-      console.log('[MC] mount → 物理由 mineflayer 暂停（载具模式）')
-    })
-
     this.bot.on('kicked', (reason) => {
       const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason)
       console.log('[MC] Kicked:', reasonStr)
       this.isReady = false
+      this.acceptedResourcePacks.clear()
+      setTimeout(() => this._handleReconnect(reasonStr.includes('spam') ? 'spam踢出' : '被踢出'), 1000)
     })
 
     this.bot.on('error', (err: NodeJS.ErrnoException) => {
@@ -140,6 +127,7 @@ export default class MinecraftBot {
     this.bot.on('end', (reason) => {
       console.log('[MC] Disconnected:', reason)
       this.isReady = false
+      this.acceptedResourcePacks.clear()
       this._handleReconnect('连接断开')
     })
   }
@@ -232,6 +220,17 @@ export default class MinecraftBot {
         this.acceptedResourcePacks.add(packKey)
       }
       console.log('[MC] Resource pack response completed')
+
+      // If bot doesn't spawn within 30s of resource pack, force reconnect
+      const spawnTimeout = setTimeout(() => {
+        if (this.bot && !this.isReady) {
+          console.log('[MC] Spawn timeout (30s), forcing reconnect...')
+          this.acceptedResourcePacks.clear()
+          try { this.bot?.end('spawn timeout') } catch { /* */ }
+          this._handleReconnect('spawn超时')
+        }
+      }, 30000)
+      this.bot.once('spawn', () => clearTimeout(spawnTimeout))
     } catch (err) {
       console.error('[MC] Resource pack error:', (err as Error).message)
     }
@@ -246,46 +245,26 @@ export default class MinecraftBot {
   }
 
   private _handleReconnect (reason: string): void {
-    if (this.reconnecting) return
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.log(`[MC] 已达到最大重连次数 (${this.maxReconnectAttempts})，停止重连`)
-      return
-    }
-
-    this.reconnecting = true
-    this.reconnectAttempts++
+    if (this.reconnectScheduled) return
+    this.reconnectScheduled = true
     const delay = reason.includes('spam') ? 30000 : this.reconnectDelay
-    console.log(`[MC] ${reason} - 第 ${this.reconnectAttempts}/${this.maxReconnectAttempts} 次重连，等待 ${delay / 1000} 秒...`)
-
-    this._cleanupBot()
+    console.log(`[MC] ${reason} - 等待 ${delay / 1000} 秒后重连...`)
 
     setTimeout(() => {
+      this.reconnectScheduled = false
       console.log('[MC] Reconnecting...')
-      this.reconnecting = false
       this.create()
     }, delay)
   }
 
-  private _cleanupBot (): void {
-    if (!this.bot) return
-    try {
-      this.bot.removeAllListeners()
-      this.bot.quit()
-    } catch {
-      // ignore cleanup errors
-    }
-    this.bot = null
-    this.isReady = false
-  }
-
   chat (message: string): boolean {
-    if (!this.isReady || !this.bot || this.reconnecting) return false
+    if (!this.isReady || !this.bot) return false
     this.bot.chat(message)
     return true
   }
 
   whisper (username: string, message: string): boolean {
-    if (!this.isReady || !this.bot || this.reconnecting) return false
+    if (!this.isReady || !this.bot) return false
     this.bot.chat(`${this.whisperCommand} ${username} ${message}`)
     return true
   }

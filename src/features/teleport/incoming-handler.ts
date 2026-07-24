@@ -11,6 +11,7 @@ export default class TeleportIncomingHandler {
   private mcBot: MinecraftBot
   private messages: CommandMessages
   private standby: StandbyManager
+  private adminList: Set<string>
   private _lastAccept?: { key: string; time: number }
   private _lastLockNotify?: { key: string; time: number }
 
@@ -19,13 +20,19 @@ export default class TeleportIncomingHandler {
     whitelist: Whitelist,
     mcBot: MinecraftBot,
     messages: CommandMessages,
-    standby: StandbyManager
+    standby: StandbyManager,
+    adminList: string[]
   ) {
     this.teleportService = teleportService
     this.whitelist = whitelist
     this.mcBot = mcBot
     this.messages = messages
     this.standby = standby
+    this.adminList = new Set(adminList)
+  }
+
+  private isAdmin(playerName: string): boolean {
+    return this.adminList.has(playerName)
   }
 
   handle (text: string): boolean {
@@ -36,11 +43,15 @@ export default class TeleportIncomingHandler {
 
     this.standby.touch()
 
-    if (!this.teleportService.canAcceptRequest(request.type)) {
-      if (request.type === 'tpahere' && this.teleportService.isLocked()) {
+    const isLockedPlayer = this.teleportService.isLocked() &&
+      this.teleportService.getLockedBy()?.toLowerCase() === request.playerName.toLowerCase()
+    const isAdmin = this.isAdmin(request.playerName)
+
+    if (!isAdmin && !this.teleportService.canAcceptRequest(request.type, isLockedPlayer ? request.playerName : undefined)) {
+      void this.teleportService.denyRequest(request.playerName)
+      if (this.teleportService.isLocked()) {
         this.notifyLocked(request.playerName)
       }
-      this.standby.scheduleAfk()
       return true
     }
 
@@ -51,9 +62,7 @@ export default class TeleportIncomingHandler {
     }
     this._lastAccept = { key: dedupeKey, time: now }
 
-    void this.teleportService.acceptRequest(request.playerName, request.type).then(() => {
-      this.standby.scheduleAfk()
-    })
+    void this.teleportService.acceptRequest(request.playerName, request.type)
     return true
   }
 
@@ -67,7 +76,7 @@ export default class TeleportIncomingHandler {
     this._lastLockNotify = { key: dedupeKey, time: now }
 
     const message = this.messages.text('lockedBlocked', { lockedBy })
-    this.mcBot.whisper(playerName, message)
+    this.mcBot.whisper(playerName, `#d9afd9${message}`)
     console.log(`[Teleport] 锁定拒绝 -> 通知 ${playerName} (锁定者: ${lockedBy})`)
   }
 }

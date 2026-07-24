@@ -30,11 +30,20 @@ export default function createTeleportRoutes (
       return res.json({ success: false, message: `${game_name} 不在白名单中` })
     }
 
-    const result = await teleportService.goToPlayerViaWaypoint(game_name, waypoint)
+    const wp = teleportService.getWaypointByAlias(waypoint)
+    if (!wp) {
+      return res.json({ success: false, message: `未知传送点: ${waypoint}` })
+    }
+    const waypoints = teleportService.listWaypoints()
+    const idx = waypoints.findIndex(w => w.alias === waypoint)
+    if (idx < 0) {
+      return res.json({ success: false, message: '传送点索引错误' })
+    }
+    const result = await teleportService.executePhome(game_name, idx)
     res.json(result)
   })
 
-  router.post('/lock', async (req: Request, res: Response) => {
+  router.post('/lock', (req: Request, res: Response) => {
     const { game_name } = req.body as { game_name?: string }
     if (!game_name) {
       return res.status(400).json({ success: false, message: 'Missing game_name' })
@@ -43,7 +52,7 @@ export default function createTeleportRoutes (
       return res.json({ success: false, message: `${game_name} 不在白名单中` })
     }
 
-    await teleportService.prepareAndLock(game_name)
+    teleportService.lock(game_name)
     res.json({ success: true, message: '已锁定' })
   })
 

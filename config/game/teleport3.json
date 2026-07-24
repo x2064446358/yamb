@@ -5,8 +5,8 @@
   "tpahereCommand": "/tpahere",
   "phomeCommand": "/phome",
   "waypointDelayMs": 3000,
-  "ownedStart": 0,
-  "ownedEnd": 5,
+  "ownedStart": 7,
+  "ownedEnd": 14,
   "waypoints": [
     { "id": "liang家", "alias": "liang家", "cmd": "/phome" },
     { "id": "刷花", "alias": "刷花", "cmd": "/phome" },

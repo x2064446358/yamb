@@ -83,7 +83,6 @@ export interface MessagesConfig {
   containerInfoNotFound?: string
   containerInfoLines?: string[]
   containerNoTarget?: string
-  helpLines?: string[]
 }
 
 export interface CommandConfig {
@@ -97,15 +96,19 @@ export interface CommandConfig {
 export interface WaypointConfig {
   id: string
   alias: string
+  cmd?: string
 }
 
 export interface TeleportConfig {
   databaseFile: string
   tpacceptCommand: string
+  tpdenyCommand: string
   tpahereCommand: string
   phomeCommand: string
   waypoints: WaypointConfig[]
   waypointDelayMs?: number
+  ownedStart?: number
+  ownedEnd?: number
 }
 
 export interface BotBehaviorConfig {
@@ -120,6 +123,14 @@ export interface BotBehaviorConfig {
   approachDistance: number
   forwardWaitMs: number
   ridingCheckIntervalMs: number
+  relockDistance: number
+  relockCheckIntervalMs: number
+  loopCmdMaxIntervalSec: number
+  maxBlacklist: number
+  maxPhomeWl: number
+  baseCheckIntervalMs: number
+  tpaCooldownMs: number
+  unlockAllTimeoutSec: number
 }
 
 export interface ViewerConfig {
@@ -138,6 +149,34 @@ export interface MessageQueueConfig {
   delayMs: number
 }
 
+export interface BotPhomeConfig {
+  name: string
+  owned: number
+  dataFile: string
+}
+
+export interface BotIdentityConfig {
+  index: number
+  accountName: string
+  cascadeDelayMs: number
+  baseMinX: number
+  baseMaxX: number
+  baseMinZ: number
+  baseMaxZ: number
+}
+
+export interface BotSyncConfig {
+  botName: string
+  syncTargets: string[]
+  enabled: boolean
+}
+
+export interface LoopCmdConfig {
+  enabled: boolean
+  text: string
+  intervalSec: number
+}
+
 export interface AppConfig {
   minecraft: MinecraftConfig
   astrbot: AstrbotConfig
@@ -148,6 +187,9 @@ export interface AppConfig {
   viewer: ViewerConfig
   brew: BrewConfig
   messageQueue: MessageQueueConfig
+  botPhome: BotPhomeConfig
+  botIdentity: BotIdentityConfig
+  loopCmd: LoopCmdConfig
 }
 
 export interface ServiceResult {

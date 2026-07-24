@@ -125,28 +125,36 @@ function loadEnvConfig (): Pick<AppConfig, 'minecraft' | 'astrbot' | 'messageQue
   }
 }
 
-function normalizeWaypoints (raw: unknown): WaypointConfig[] {
+interface RawWaypoint {
+  id: string
+  alias: string
+  cmd?: string
+}
+
+function normalizeWaypoints (raw: unknown): RawWaypoint[] {
   if (!Array.isArray(raw)) return []
 
-  const waypoints: WaypointConfig[] = []
+  const waypoints: RawWaypoint[] = []
   for (const item of raw) {
     if (typeof item === 'string') {
       waypoints.push({ id: item, alias: item })
       continue
     }
     if (item && typeof item === 'object') {
-      const w = item as Partial<WaypointConfig>
-      const id = w.id?.trim()
-      const alias = w.alias?.trim()
-      if (id && alias) waypoints.push({ id, alias })
+      const w = item as Record<string, unknown>
+      const id = String(w.id || '').trim()
+      const alias = String(w.alias || '').trim()
+      const cmd = String(w.cmd || '').trim()
+      if (id && alias) waypoints.push({ id, alias, cmd: cmd || undefined })
     }
   }
   return waypoints
 }
 
-function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 'viewer' | 'brew'> {
+function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 'viewer' | 'brew' | 'botPhome' | 'botIdentity' | 'loopCmd'> {
   const commandPath = path.join(GAME_CONFIG_DIR, 'command.json')
-  const teleportPath = path.join(GAME_CONFIG_DIR, 'teleport.json')
+  const teleportConfigFile = process.env.BOT_TELEPORT_CONFIG || 'teleport.json'
+  const teleportPath = path.join(GAME_CONFIG_DIR, teleportConfigFile)
   const botPath = path.join(GAME_CONFIG_DIR, 'bot.json')
   const viewerPath = path.join(GAME_CONFIG_DIR, 'viewer.json')
   const brewPath = path.join(GAME_CONFIG_DIR, 'brew.json')
@@ -163,6 +171,14 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
 
   const prefix = commandConfig.prefix || '#ybot'
 
+  // Also read raw JSON to get cmd field on waypoints
+  let rawTeleportJson: Record<string, unknown> = {}
+  try {
+    const raw = fs.readFileSync(teleportPath, 'utf-8')
+    rawTeleportJson = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
+  } catch { /* */ }
+  const rawWaypoints = (rawTeleportJson.waypoints as unknown) ?? teleportConfig.waypoints
+
   return {
     command: {
       prefix,
@@ -172,12 +188,15 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       messages
     },
     teleport: {
-      databaseFile: teleportConfig.databaseFile || './data/db.db',
+      databaseFile: teleportConfig.databaseFile || './data/mchatbot.db',
       tpacceptCommand: teleportConfig.tpacceptCommand || '/tpaccept',
+      tpdenyCommand: (teleportConfig as any).tpdenyCommand || '/tpdeny',
       tpahereCommand: teleportConfig.tpahereCommand || '/tpahere',
       phomeCommand: teleportConfig.phomeCommand || '/phome',
-      waypoints: normalizeWaypoints(teleportConfig.waypoints),
-      waypointDelayMs: teleportConfig.waypointDelayMs ?? 3000
+      waypoints: normalizeWaypoints(rawWaypoints),
+      waypointDelayMs: teleportConfig.waypointDelayMs ?? 3000,
+      ownedStart: teleportConfig.ownedStart ?? 0,
+      ownedEnd: teleportConfig.ownedEnd ?? 15
     },
     bot: {
       idleTimeoutMs: botConfig.idleTimeoutMs ?? 90000,
@@ -187,10 +206,18 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       afkDelayMs: botConfig.afkDelayMs ?? 500,
       homeWaitMs: botConfig.homeWaitMs ?? 3000,
       replyDelayMs: botConfig.replyDelayMs ?? 500,
-      interactionDistance: botConfig.interactionDistance ?? (botConfig as { mountRange?: number }).mountRange ?? 3,
+      interactionDistance: botConfig.interactionDistance ?? 3,
       approachDistance: botConfig.approachDistance ?? 10,
-      forwardWaitMs: botConfig.forwardWaitMs ?? (botConfig as { fwdWaitMs?: number }).fwdWaitMs ?? 2000,
-      ridingCheckIntervalMs: botConfig.ridingCheckIntervalMs ?? 1500
+      forwardWaitMs: botConfig.forwardWaitMs ?? 2000,
+      ridingCheckIntervalMs: botConfig.ridingCheckIntervalMs ?? 1500,
+      relockDistance: botConfig.relockDistance ?? 6,
+      relockCheckIntervalMs: botConfig.relockCheckIntervalMs ?? 1000,
+      loopCmdMaxIntervalSec: botConfig.loopCmdMaxIntervalSec ?? 3600,
+      maxBlacklist: botConfig.maxBlacklist ?? 50,
+      maxPhomeWl: botConfig.maxPhomeWl ?? 30,
+      baseCheckIntervalMs: botConfig.baseCheckIntervalMs ?? 250,
+      tpaCooldownMs: botConfig.tpaCooldownMs ?? 5000,
+      unlockAllTimeoutSec: botConfig.unlockAllTimeoutSec ?? 60
     },
     viewer: {
       enabled: viewerConfig.enabled ?? false,
@@ -200,6 +227,25 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
     },
     brew: {
       enabled: brewConfig.enabled ?? false
+    },
+    botPhome: {
+      name: process.env.BOT_NAME || (botConfig as Record<string, unknown>).botName as string || 'WLLBot',
+      owned: envInt(process.env.BOT_PHOME_OWNED, 6),
+      dataFile: (botConfig as Record<string, unknown>).phomeDataFile as string || 'phome_data.txt'
+    },
+    botIdentity: {
+      index: envInt(process.env.BOT_INDEX, 1),
+      accountName: process.env.MC_USERNAME || '',
+      cascadeDelayMs: envInt(process.env.BOT_CASCADE_DELAY_MS, 0),
+      baseMinX: envInt(process.env.BOT_BASE_MIN_X, 0),
+      baseMaxX: envInt(process.env.BOT_BASE_MAX_X, 0),
+      baseMinZ: envInt(process.env.BOT_BASE_MIN_Z, 0),
+      baseMaxZ: envInt(process.env.BOT_BASE_MAX_Z, 0)
+    },
+    loopCmd: {
+      enabled: false,
+      text: '',
+      intervalSec: 60
     }
   }
 }
