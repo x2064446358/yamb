@@ -99,6 +99,7 @@ async function main (): Promise<void> {
     config.bot.approachDistance
   )
   const ridingManager = new RidingManager(mcBot, playerInteraction, config.bot)
+  ridingManager.setDb(db, config.botPhome.name || config.minecraft.username || 'bot')
   standbyManager.setRidingManager(ridingManager)
   standbyManager.setLockChecker(() => teleportService.isLocked())
   const inventoryActions = new InventoryActions(mcBot)
@@ -140,6 +141,7 @@ async function main (): Promise<void> {
   mcBot.onSpawn(() => {
     registerChatListeners(mcBot, commandHandler, teleportHandler, systemBuffer)
     ridingManager.start()
+    ridingManager.tryRestoreMount()
     standbyManager.start()
     loopCmd.start()
     antiPVP.start()

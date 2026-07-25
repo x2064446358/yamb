@@ -1,4 +1,5 @@
 import type { Bot } from 'mineflayer'
+import type { DatabaseSync } from 'node:sqlite'
 import type { BotBehaviorConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type PlayerInteractionService from '../../actions/player'
@@ -26,6 +27,8 @@ export default class RidingManager {
   private notMountedStreak = 0
   private monitorTimer: ReturnType<typeof setInterval> | null = null
   private listenersAttached = false
+  private db: DatabaseSync | null = null
+  private botName = ''
 
   constructor (
     mcBot: MinecraftBot,
@@ -36,6 +39,12 @@ export default class RidingManager {
     this.playerInteraction = playerInteraction
     this.homeCommand = botConfig.homeCommand
     this.checkIntervalMs = botConfig.ridingCheckIntervalMs ?? 1500
+  }
+
+  setDb (db: DatabaseSync, botName: string): void {
+    this.db = db
+    this.botName = botName
+    this.restoreRidingState()
   }
 
   getMode (): RidingMode {
@@ -55,6 +64,7 @@ export default class RidingManager {
     this.targetPlayer = playerName
     this.dismountRequested = false
     this.notMountedStreak = 0
+    this.saveRidingState()
     console.log(`[Riding] 进入骑乘模式 -> ${playerName}`)
   }
 
@@ -63,6 +73,7 @@ export default class RidingManager {
     this.targetPlayer = null
     this.dismountRequested = false
     this.notMountedStreak = 0
+    this.saveRidingState()
     console.log('[Riding] 进入矿车模式')
   }
 
@@ -74,6 +85,7 @@ export default class RidingManager {
     this.dismountRequested = false
     this.handlingDismount = false
     this.notMountedStreak = 0
+    this.saveRidingState()
     const bot = this.mcBot.bot
     if (bot) clearVehicleState(bot)
   }
@@ -220,5 +232,60 @@ export default class RidingManager {
     console.log(`[Riding] 重新骑乘失败，执行 ${this.homeCommand}`)
     this.mcBot.chat(this.homeCommand)
     this.clearMode()
+  }
+
+  private saveRidingState (): void {
+    if (!this.db) return
+    try {
+      this.db.exec("CREATE TABLE IF NOT EXISTS riding_state (bot_name TEXT PRIMARY KEY, mode TEXT, target_player TEXT)")
+      if (this.mode !== 'idle') {
+        this.db.prepare('INSERT OR REPLACE INTO riding_state (bot_name, mode, target_player) VALUES (?, ?, ?)').run(this.botName, this.mode, this.targetPlayer || null)
+      } else {
+        this.db.prepare('DELETE FROM riding_state WHERE bot_name = ?').run(this.botName)
+      }
+    } catch { /* */ }
+  }
+
+  private restoreRidingState (): void {
+    if (!this.db) return
+    try {
+      this.db.exec("CREATE TABLE IF NOT EXISTS riding_state (bot_name TEXT PRIMARY KEY, mode TEXT, target_player TEXT)")
+      const row = this.db.prepare('SELECT mode, target_player FROM riding_state WHERE bot_name = ?').get(this.botName) as { mode: string; target_player: string | null } | undefined
+      if (!row) return
+
+      if (row.mode === 'player' && row.target_player) {
+        this.mode = 'player'
+        this.targetPlayer = row.target_player
+        this.dismountRequested = false
+        this.notMountedStreak = 0
+        console.log(`[Riding] 恢复骑乘状态 -> ${row.target_player}`)
+      } else if (row.mode === 'minecart') {
+        this.mode = 'minecart'
+        this.targetPlayer = null
+        this.dismountRequested = false
+        this.notMountedStreak = 0
+        console.log('[Riding] 恢复矿车模式')
+      }
+    } catch { /* */ }
+  }
+
+  async tryRestoreMount (): Promise<void> {
+    if (this.mode === 'idle') return
+    await sleep(2000)
+
+    if (this.mode === 'player' && this.targetPlayer) {
+      console.log(`[Riding] 尝试重连骑乘 ${this.targetPlayer}...`)
+      const remounted = await this.playerInteraction.remountPlayer(this.targetPlayer)
+      if (remounted) {
+        console.log(`[Riding] 重连骑乘 ${this.targetPlayer} 成功`)
+        return
+      }
+      console.log(`[Riding] 重连骑乘失败，清除状态`)
+      this.clearMode()
+    } else if (this.mode === 'minecart') {
+      // Minecart restore is handled by re-entering via cart command
+      console.log('[Riding] 矿车模式需手动上车恢复')
+      this.clearMode()
+    }
   }
 }

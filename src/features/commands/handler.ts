@@ -1078,10 +1078,9 @@ export default class CommandHandler {
   }
 
   private async _unlockAll (username: string, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) { await this.reply(username, this.messages.text('noPermission'), source); return }
+    if (this.teleportService.getLockedBy() !== username) { return }
     this.teleportService.unlock()
-    this.botSync.broadcast('!unlockall')
-    await this.reply(username, '所有 bot 已解锁。', source)
+    await this.reply(username, '已解锁。', source)
   }
 
   private async _transferLock (username: string, target: string | undefined, source: CommandSource): Promise<void> {
