@@ -14,7 +14,6 @@ import type LoopCmd from '../loopcmd'
 import type BotSync from '../botsync'
 import CommandMessages from './messages'
 import { sleep } from '../../platform/sleep'
-import { isMountedOnPlayer } from '../../actions/shared/entity-utils'
 import { getTargetContainerBlock } from '../container/utils'
 import {
   type CommandSource,
@@ -26,7 +25,7 @@ import {
 import type JumpModule from '../jump'
 import type UseItemModule from '../useitem'
 import { lookEnchant } from '../enchant'
-
+import { performDismount } from '../../actions/shared/entity-utils'
 import type { DatabaseSync } from 'node:sqlite'
 
 export default class CommandHandler {
@@ -615,25 +614,17 @@ export default class CommandHandler {
 
     try {
       if (this.ridingManager.isActive()) {
-        await this.ridingManager.dismount()
-        await sleep(300)
+        bot.dismount()
+        this.ridingManager.clearMode()
+        await sleep(200)
       }
       await bot.unequip('hand')
       await bot.lookAt(entity.position.offset(0, 1.6, 0), true)
       bot.activateEntityAt(entity, entity.position.offset(0, 1.6, 0))
       this.ridingManager.enterPlayerMode(targetName)
-
-      // Wait and verify mount succeeded
-      await sleep(800)
-      if (isMountedOnPlayer(bot, targetName)) {
-        await this.reply(username, `已骑乘 ${targetName}`, source)
-      } else {
-        this.ridingManager.clearMode()
-        await this.reply(username, '坐失败', source)
-      }
+      await this.reply(username, `已骑乘 ${targetName}`, source)
     } catch (err) {
-      this.ridingManager.clearMode()
-      await this.reply(username, `坐失败: ${(err as Error).message}`, source)
+      await this.reply(username, `骑乘失败: ${(err as Error).message}`, source)
     }
   }
 
@@ -657,9 +648,12 @@ export default class CommandHandler {
   }
 
   private async _dismountCmd (username: string, source: CommandSource): Promise<void> {
-    const result = await this.ridingManager.dismount()
-    if (!result.success) {
-      await this.reply(username, this.messages.text('unmountError', { message: result.message }), source)
+    const bot = this.mcBot.bot
+    if (!bot) return
+    const ok = await performDismount(bot)
+    this.ridingManager.clearMode()
+    if (!ok) {
+      await this.reply(username, this.messages.text('unmountError', { message: '下车失败，请重试' }), source)
       return
     }
     await this.reply(username, '已下车', source)
@@ -1078,9 +1072,10 @@ export default class CommandHandler {
   }
 
   private async _unlockAll (username: string, source: CommandSource): Promise<void> {
-    if (this.teleportService.getLockedBy() !== username) { return }
+    if (!this.isAdmin(username)) { await this.reply(username, this.messages.text('noPermission'), source); return }
     this.teleportService.unlock()
-    await this.reply(username, '已解锁。', source)
+    this.botSync.broadcast('!unlockall')
+    await this.reply(username, '所有 bot 已解锁。', source)
   }
 
   private async _transferLock (username: string, target: string | undefined, source: CommandSource): Promise<void> {
