@@ -19,6 +19,10 @@ export default class StandbyManager {
   private checkTimer: ReturnType<typeof setInterval> | null = null
   private afkTimer: ReturnType<typeof setTimeout> | null = null
   private goingHome = false
+  private baseMinX = 0
+  private baseMaxX = 0
+  private baseMinZ = 0
+  private baseMaxZ = 0
 
   constructor (mcBot: MinecraftBot, config: BotBehaviorConfig) {
     this.mcBot = mcBot
@@ -36,6 +40,21 @@ export default class StandbyManager {
 
   setLockChecker (fn: () => boolean): void {
     this.isLocked = fn
+  }
+
+  setBaseArea (minX: number, maxX: number, minZ: number, maxZ: number): void {
+    this.baseMinX = minX
+    this.baseMaxX = maxX
+    this.baseMinZ = minZ
+    this.baseMaxZ = maxZ
+  }
+
+  private isAtBase (): boolean {
+    const bot = this.mcBot.bot
+    if (!bot) return false
+    if (!this.baseMinX && !this.baseMaxX && !this.baseMinZ && !this.baseMaxZ) return false
+    const { x, z } = bot.entity.position
+    return x >= this.baseMinX && x <= this.baseMaxX && z >= this.baseMinZ && z <= this.baseMaxZ
   }
 
   start (): void {
@@ -65,6 +84,7 @@ export default class StandbyManager {
   scheduleAfk (): void {
     if (this.afkTimer) clearTimeout(this.afkTimer)
     this.afkTimer = setTimeout(() => {
+      if (this.ridingManager?.isActive()) return
       if (this.mcBot.chat(this.afkCommand)) {
         console.log(`[Standby] 执行 ${this.afkCommand}`)
       }
@@ -81,13 +101,18 @@ export default class StandbyManager {
 
   async goHomeStandby (): Promise<void> {
     if (!this.mcBot.isReady || !this.mcBot.bot || this.goingHome) return
+    if (this.ridingManager?.isActive()) return
 
     this.goingHome = true
-    console.log(`[Standby] 超过 ${this.idleTimeoutMs / 1000}s 无互动，执行 ${this.homeCommand}`)
 
     try {
-      this.mcBot.chat(this.homeCommand)
-      await sleep(this.homeWaitMs)
+      if (this.isAtBase()) {
+        console.log(`[Standby] 已在基地，跳过 ${this.homeCommand}`)
+      } else {
+        console.log(`[Standby] 超过 ${this.idleTimeoutMs / 1000}s 无互动，执行 ${this.homeCommand}`)
+        this.mcBot.chat(this.homeCommand)
+        await sleep(this.homeWaitMs)
+      }
 
       if (this.mcBot.bot) {
         await eatGoldenCarrotsUntilFull(this.mcBot.bot)

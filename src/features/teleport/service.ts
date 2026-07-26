@@ -1,3 +1,4 @@
+import fs from 'fs'
 import type { ServiceResult, TeleportConfig, WaypointConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type { DatabaseSync } from 'node:sqlite'
@@ -23,8 +24,12 @@ export default class TeleportService {
   private commandBusy = false
   private busyUser: string | null = null
   private phomeTimeout: ReturnType<typeof setTimeout> | null = null
-  private ownedStart: number
-  private ownedEnd: number
+  private _ownedIndices: number[] = []
+  private _configPath = ''
+
+  setConfigPath (p: string): void {
+    this._configPath = p
+  }
 
   constructor (mcBot: MinecraftBot, config: TeleportConfig) {
     this.mcBot = mcBot
@@ -32,8 +37,7 @@ export default class TeleportService {
     this.tpdenyCommand = config.tpdenyCommand
     this.tpahereCommand = config.tpahereCommand
     this.phomeCommand = config.phomeCommand
-    this.ownedStart = config.ownedStart ?? 0
-    this.ownedEnd = config.ownedEnd ?? 15
+    this._ownedIndices = config.ownedIndices ?? []
     const waypoints = config.waypoints || []
     this.waypointList = waypoints.map(w => ({
       id: w.id,
@@ -93,7 +97,7 @@ export default class TeleportService {
   }
 
   isOwned(idx: number): boolean {
-    return idx >= this.ownedStart && idx <= this.ownedEnd
+    return this._ownedIndices.includes(idx)
   }
 
   // === Lock ===
@@ -332,7 +336,8 @@ export default class TeleportService {
     } else {
       this.waypointList.push(entry)
     }
-    this.ownedEnd++
+    this._ownedIndices.push(this.waypointList.indexOf(entry))
+    this.saveOwnedIndices()
     this.rebuildAliasMap()
     const idx = this.waypointList.indexOf(entry)
     return { success: true, message: `已添加传送点: %${idx + 1}[${name}]` }
@@ -342,7 +347,8 @@ export default class TeleportService {
     if (idx < 0 || idx >= this.waypointList.length) return { success: false, message: '传送点不存在。' }
     if (!this.isOwned(idx)) return { success: false, message: '不能删除其他 bot 的传送点。' }
     const removed = this.waypointList.splice(idx, 1)[0]
-    this.ownedEnd--
+    this._ownedIndices = this._ownedIndices.filter(i => i !== idx).map(i => i > idx ? i - 1 : i)
+    this.saveOwnedIndices()
     this.rebuildAliasMap()
     return { success: true, message: `已移除传送点: ${removed.alias}` }
   }
@@ -351,5 +357,17 @@ export default class TeleportService {
     this.waypointByAlias = new Map(
       this.waypointList.map(w => [w.alias, { id: w.id, cmd: w.cmd }])
     )
+  }
+
+  private saveOwnedIndices(): void {
+    if (!this._configPath) return
+    try {
+      const raw = fs.readFileSync(this._configPath, 'utf-8')
+      const data = JSON.parse(raw) as Record<string, unknown>
+      data.ownedIndices = this._ownedIndices
+      fs.writeFileSync(this._configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+    } catch (err) {
+      console.warn('[Teleport] Failed to save ownedIndices:', (err as Error).message)
+    }
   }
 }

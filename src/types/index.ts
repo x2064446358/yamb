@@ -107,8 +107,7 @@ export interface TeleportConfig {
   phomeCommand: string
   waypoints: WaypointConfig[]
   waypointDelayMs?: number
-  ownedStart?: number
-  ownedEnd?: number
+  ownedIndices?: number[]
 }
 
 export interface BotBehaviorConfig {

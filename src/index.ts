@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import fs from 'fs'
 import path from 'path'
-import { loadConfig, validateConfig, resolveDataPath } from './config/loader'
+import { loadConfig, validateConfig, resolveDataPath, GAME_CONFIG_DIR } from './config/loader'
 import { initDatabase, migrateFromJson, closeDatabase } from './platform/database'
 import { importWllbotData } from './platform/import-data'
 import MessageQueue from './platform/message-queue'
@@ -81,7 +81,15 @@ async function main (): Promise<void> {
 
   const systemBuffer = new SystemMessageBuffer()
   const standbyManager = new StandbyManager(mcBot, config.bot)
+  standbyManager.setBaseArea(
+    config.botIdentity.baseMinX,
+    config.botIdentity.baseMaxX,
+    config.botIdentity.baseMinZ,
+    config.botIdentity.baseMaxZ
+  )
   const teleportService = new TeleportService(mcBot, config.teleport)
+  const teleportConfigFile = process.env.BOT_TELEPORT_CONFIG || 'teleport.json'
+  teleportService.setConfigPath(path.join(GAME_CONFIG_DIR, teleportConfigFile))
   teleportService.setDb(db, config.botPhome.name || config.minecraft.username || 'bot')
   teleportService.setOnUnlock(({ wasHover }) => {
     if (wasHover && mcBot.bot) {
@@ -99,6 +107,14 @@ async function main (): Promise<void> {
     config.bot.approachDistance
   )
   const ridingManager = new RidingManager(mcBot, playerInteraction, config.bot)
+  ridingManager.setDb(db, config.botPhome.name || config.minecraft.username || 'bot')
+  ridingManager.setLockChecker(() => teleportService.isLocked())
+  ridingManager.setBaseArea(
+    config.botIdentity.baseMinX,
+    config.botIdentity.baseMaxX,
+    config.botIdentity.baseMinZ,
+    config.botIdentity.baseMaxZ
+  )
   standbyManager.setRidingManager(ridingManager)
   standbyManager.setLockChecker(() => teleportService.isLocked())
   const inventoryActions = new InventoryActions(mcBot)
@@ -140,6 +156,7 @@ async function main (): Promise<void> {
   mcBot.onSpawn(() => {
     registerChatListeners(mcBot, commandHandler, teleportHandler, systemBuffer)
     ridingManager.start()
+    ridingManager.tryRestoreMount()
     standbyManager.start()
     loopCmd.start()
     antiPVP.start()

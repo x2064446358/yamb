@@ -14,6 +14,7 @@ import type LoopCmd from '../loopcmd'
 import type BotSync from '../botsync'
 import CommandMessages from './messages'
 import { sleep } from '../../platform/sleep'
+import { isMountedOnPlayer, approachEntity } from '../../actions/shared/entity-utils'
 import { getTargetContainerBlock } from '../container/utils'
 import {
   type CommandSource,
@@ -25,7 +26,7 @@ import {
 import type JumpModule from '../jump'
 import type UseItemModule from '../useitem'
 import { lookEnchant } from '../enchant'
-import { performDismount } from '../../actions/shared/entity-utils'
+
 import type { DatabaseSync } from 'node:sqlite'
 
 export default class CommandHandler {
@@ -606,25 +607,44 @@ export default class CommandHandler {
       for (const [, e] of Object.entries(bot.entities)) {
         if (e?.type !== 'player' || e === bot.entity || (e as { username?: string }).username === bot.username) continue
         const dist = bot.entity.position.distanceTo(e.position)
-        if (dist > 6) continue
+        if (dist > 5) continue
         if ((e as { username?: string }).username?.toLowerCase() === targetName.toLowerCase()) { entity = e; break }
       }
     }
-    if (!entity) { await this.reply(username, `6格内无此玩家: ${targetName}`, source); return }
+    if (!entity) { await this.reply(username, `5格内无此玩家: ${targetName}`, source); return }
 
     try {
       if (this.ridingManager.isActive()) {
-        bot.dismount()
-        this.ridingManager.clearMode()
-        await sleep(200)
+        await this.ridingManager.dismount()
+        await sleep(300)
       }
+
+      // Walk to player (within 5 blocks)
+      const approach = await approachEntity(bot, entity, this.interactionDistance, 5)
+      if (!approach.success) {
+        await this.reply(username, `无法接近 ${targetName}: ${approach.message}`, source)
+        return
+      }
+      // Refresh entity after moving
+      entity = bot.players[targetName]?.entity ?? entity
+
       await bot.unequip('hand')
       await bot.lookAt(entity.position.offset(0, 1.6, 0), true)
       bot.activateEntityAt(entity, entity.position.offset(0, 1.6, 0))
       this.ridingManager.enterPlayerMode(targetName)
-      await this.reply(username, `已骑乘 ${targetName}`, source)
+
+      // Wait and verify mount succeeded
+      await sleep(800)
+      if (isMountedOnPlayer(bot, targetName)) {
+        await this.reply(username, `已骑乘 ${targetName}`, source)
+        this.mcBot.chat('/afk')
+      } else {
+        this.ridingManager.clearMode()
+        await this.reply(username, '坐失败', source)
+      }
     } catch (err) {
-      await this.reply(username, `骑乘失败: ${(err as Error).message}`, source)
+      this.ridingManager.clearMode()
+      await this.reply(username, `坐失败: ${(err as Error).message}`, source)
     }
   }
 
@@ -648,12 +668,9 @@ export default class CommandHandler {
   }
 
   private async _dismountCmd (username: string, source: CommandSource): Promise<void> {
-    const bot = this.mcBot.bot
-    if (!bot) return
-    const ok = await performDismount(bot)
-    this.ridingManager.clearMode()
-    if (!ok) {
-      await this.reply(username, this.messages.text('unmountError', { message: '下车失败，请重试' }), source)
+    const result = await this.ridingManager.dismount()
+    if (!result.success) {
+      await this.reply(username, this.messages.text('unmountError', { message: result.message }), source)
       return
     }
     await this.reply(username, '已下车', source)
@@ -1072,10 +1089,9 @@ export default class CommandHandler {
   }
 
   private async _unlockAll (username: string, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) { await this.reply(username, this.messages.text('noPermission'), source); return }
+    if (this.teleportService.getLockedBy() !== username) { return }
     this.teleportService.unlock()
-    this.botSync.broadcast('!unlockall')
-    await this.reply(username, '所有 bot 已解锁。', source)
+    await this.reply(username, '已解锁。', source)
   }
 
   private async _transferLock (username: string, target: string | undefined, source: CommandSource): Promise<void> {

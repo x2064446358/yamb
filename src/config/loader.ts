@@ -195,8 +195,7 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       phomeCommand: teleportConfig.phomeCommand || '/phome',
       waypoints: normalizeWaypoints(rawWaypoints),
       waypointDelayMs: teleportConfig.waypointDelayMs ?? 3000,
-      ownedStart: teleportConfig.ownedStart ?? 0,
-      ownedEnd: teleportConfig.ownedEnd ?? 15
+      ownedIndices: (teleportConfig as any).ownedIndices ?? undefined,
     },
     bot: {
       idleTimeoutMs: botConfig.idleTimeoutMs ?? 90000,
