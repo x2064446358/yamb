@@ -270,7 +270,7 @@ export default class CommandHandler {
     const text = normalizeInput(message)
     if (!text) return
     const isPhomeNum = /^%?\d+$/.test(text)
-    if (!isPhomeNum && !this.isWhitelisted(username)) return
+    if (!isPhomeNum && !this.isWhitelisted(username) && !this.isAdmin(username)) return
     console.log(`[DEBUG] handle: ${source}:${username} text="${text}" isPhomeNum=${isPhomeNum} whitelisted=${this.isWhitelisted(username)}`)
 
     // Lock check: only locked player and admins can control bot
