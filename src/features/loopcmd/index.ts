@@ -33,14 +33,15 @@ export default class LoopCmd {
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null }
     this.active = false
+    this.config.enabled = false
     console.log('[LoopCmd] Stopped')
   }
 
   update(text: string, intervalSec: number): void {
+    this.stop()
     this.config.text = text
     this.config.intervalSec = intervalSec
     this.config.enabled = text.length > 0
-    this.stop()
     if (this.config.enabled) this.start()
   }
 
