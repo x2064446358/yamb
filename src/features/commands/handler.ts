@@ -284,6 +284,9 @@ export default class CommandHandler {
       const cmd = text.split(/\s+/)[0]?.toLowerCase() || ''
       const allowedCmds = ['状态', '状态2', '状态3', 'status', 'status2', 'status3', '挂机', 'phome', '0', '跳跃', 'xjump', '改锁定']
       if (username !== this.teleportService.getLockedBy() && !this.isAdmin(username) && !allowedCmds.includes(cmd)) {
+        if (cmd === '解锁' || cmd === 'unlock') {
+          await this.reply(username, `已被 ${this.teleportService.getLockedBy()} 锁定，无法解锁`, source)
+        }
         return
       }
     }
