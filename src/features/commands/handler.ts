@@ -262,6 +262,12 @@ export default class CommandHandler {
     await this.reply(username, this.messages.text('lockedBlocked', { lockedBy }), source)
   }
 
+  // Commands that are whisper-only (not allowed in public chat)
+  private static PUBLIC_DISALLOWED = new Set([
+    '丢弃', '丢弃全部', '手持', 'drop', 'dropall', 'hold',
+    'inv', 'store', 'take', 'container'
+  ])
+
   async handle (username: string, message: string, source: CommandSource): Promise<void> {
     if (username === this.mcBot.bot?.username) return
 
@@ -298,6 +304,9 @@ export default class CommandHandler {
         return
       }
       parts = args
+      // Block whisper-only commands from public chat
+      const pubCmd = (parts[0] || '').toLowerCase()
+      if (CommandHandler.PUBLIC_DISALLOWED.has(pubCmd)) return
     }
 
     const dedupeKey = `${source}:${username}:${text}`

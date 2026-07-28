@@ -8,10 +8,7 @@ export function normalizeInput (text: string): string {
 
 export function matchesPrefix (text: string, prefix: string): boolean {
   const normalized = normalizeInput(text)
-  if (!normalized.startsWith(prefix)) return false
-  if (normalized === prefix) return true
-  const after = normalized.slice(prefix.length)
-  return after.startsWith(' ') || /^\d/.test(after)
+  return normalized.startsWith(prefix)
 }
 
 export function parsePrefixedArgs (text: string, prefix: string): string[] {
