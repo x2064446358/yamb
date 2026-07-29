@@ -556,7 +556,6 @@ export default class CommandHandler {
   }
 
   private async _phomeList (username: string, source: CommandSource): Promise<void> {
-    if (source === 'chat' && this.botIndex !== 1) return
     await this.reply(username, this.teleportService.getPhomeListText(), source)
   }
 

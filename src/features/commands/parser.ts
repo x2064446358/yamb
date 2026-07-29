@@ -3,7 +3,7 @@ export function stripMcFormatting (text: string): string {
 }
 
 export function normalizeInput (text: string): string {
-  return stripMcFormatting(text).replace(/^\/+/, '').trim()
+  return stripMcFormatting(text).replace(/^\/+/, '').replace(/\s*喵~$/g, '').trim()
 }
 
 export function matchesPrefix (text: string, prefix: string): boolean {

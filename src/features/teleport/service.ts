@@ -37,13 +37,13 @@ export default class TeleportService {
     this.tpdenyCommand = config.tpdenyCommand
     this.tpahereCommand = config.tpahereCommand
     this.phomeCommand = config.phomeCommand
-    this._ownedIndices = config.ownedIndices ?? []
     const waypoints = config.waypoints || []
     this.waypointList = waypoints.map(w => ({
       id: w.id,
       alias: w.alias || w.id,
       cmd: w.cmd || '/phome'
     }))
+    this._ownedIndices = (config.ownedIndices ?? []).filter(i => i >= 0 && i < this.waypointList.length)
     this.waypointByAlias = new Map(
       this.waypointList.map(w => [w.alias, { id: w.id, cmd: w.cmd }])
     )
@@ -318,6 +318,7 @@ export default class TeleportService {
   getPhomeListText(): string {
     let text = '传送点:'
     for (let i = 0; i < this.waypointList.length; i++) {
+      if (!this._ownedIndices.includes(i)) continue
       text += ` %${i + 1}[${this.waypointList[i].alias}]`
     }
     return text
@@ -365,6 +366,7 @@ export default class TeleportService {
       const raw = fs.readFileSync(this._configPath, 'utf-8')
       const data = JSON.parse(raw) as Record<string, unknown>
       data.ownedIndices = this._ownedIndices
+      data.waypoints = this.waypointList.map(w => ({ id: w.id, alias: w.alias, cmd: w.cmd }))
       fs.writeFileSync(this._configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8')
     } catch (err) {
       console.warn('[Teleport] Failed to save ownedIndices:', (err as Error).message)
