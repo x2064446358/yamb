@@ -2,6 +2,23 @@ import mineflayer, { Bot, BotOptions } from 'mineflayer'
 import type { MinecraftConfig } from '../types'
 import type MessageQueue from './message-queue'
 import { getBotClient } from './bot-client'
+import { debug, info, warn, error } from './logger'
+
+/** 高视距上限（use/place/look/跳跃 时临时拉高）。可用 MC_HIGH_VIEW_DISTANCE 覆盖。
+ *  视距每 +1，加载区块数按 ~(2d+1)² 增长，是 mineflayer 内存消耗的大头，默认不宜过高。 */
+function highViewDistance (): number {
+  const raw = Number(process.env.MC_HIGH_VIEW_DISTANCE)
+  if (Number.isFinite(raw)) return Math.max(6, Math.min(12, Math.floor(raw)))
+  return 10
+}
+
+/** 破基岩模式（放置 <方块名> 追踪）固定视距（区块）。可用 MC_BREAK_VIEW_DISTANCE 覆盖，默认 8。
+ *  追踪的机器/方块通常远离 bot，需要更远视距保证方块加载，故固定为 8 区块。 */
+function breakViewDistance (): number {
+  const raw = Number(process.env.MC_BREAK_VIEW_DISTANCE)
+  if (Number.isFinite(raw)) return Math.max(6, Math.min(12, Math.floor(raw)))
+  return 8
+}
 
 export default class MinecraftBot {
   config: MinecraftConfig
@@ -11,9 +28,20 @@ export default class MinecraftBot {
   private reconnectAttempts = 0
   private readonly reconnectDelay = 20000
   private reconnectScheduled = false
+  private stopped = false
   private messageQueue: MessageQueue | null = null
   private onSpawnCallbacks: Array<(bot: MinecraftBot) => void> = []
   private whisperCommand = '/msg'
+  private currentViewDistance = 6
+  private highViewRequests = 0
+  private highViewTimer: ReturnType<typeof setTimeout> | null = null
+  /** 破基岩模式是否开启：开启时视距固定 breakViewDistance()，占住高位请求不回落 */
+  private breakViewActive = false
+  private lastKeepAliveAt = 0
+  private kaMonitor: ReturnType<typeof setInterval> | null = null
+  // 关闭聊天签名：部分服务器(改过的 /msg 等命令)会让签名命令 argSigs=0 触发 chat_validation_failed。
+  // 社区标准解法，环境变量 MC_DISABLE_CHAT_SIGNING=true 开启
+  private readonly disableChatSigning = process.env.MC_DISABLE_CHAT_SIGNING === 'true'
 
   constructor (config: MinecraftConfig, whisperCommand = '/msg') {
     this.config = config
@@ -24,23 +52,45 @@ export default class MinecraftBot {
     this.messageQueue = queue
   }
 
+  /** 重载时断开当前连接（不触发自动重连），随后可调用 create() 重建 */
+  disconnect (): void {
+    this.stopped = true
+    this._stopKeepAliveMonitor()
+    this.isReady = false
+    this.reconnectScheduled = false
+    if (this.bot) {
+      const old = this.bot
+      this.bot = null
+      try { old.end('reload') } catch { /* */ }
+      try { old.removeAllListeners() } catch { /* */ }
+    }
+    this.acceptedResourcePacks.clear()
+  }
+
   onSpawn (callback: (bot: MinecraftBot) => void): void {
     this.onSpawnCallbacks.push(callback)
   }
 
   create (): Bot {
-    console.log('[MC] Creating bot...')
+    // 清理旧 bot：removeAllListeners 防止重连后旧 bot 的事件监听器残留
+    if (this.bot) {
+      try { this.bot.removeAllListeners() } catch { /* */ }
+      this.bot = null
+    }
+    this.stopped = false
+    info('[MC] Creating bot...')
     const options = {
       host: this.config.host,
       port: this.config.port,
       username: this.config.username!,
       auth: this.config.auth as 'microsoft' | 'mojang' | 'offline',
       profilesFolder: this.config.profilesFolder,
-      checkTimeoutInterval: this.config.checkTimeoutInterval || 300000,
+      checkTimeoutInterval: this.config.checkTimeoutInterval || 60000,
       connectTimeout: 60000,
       keepAlive: true,
       skipValidation: true,
       hideErrors: true,
+      ...(this.disableChatSigning ? { disableChatSigning: true } : {}),
       ...(this.config.version !== false ? { version: this.config.version } : {})
     } as BotOptions
 
@@ -50,7 +100,7 @@ export default class MinecraftBot {
     }
 
     if (this.config.auth === 'microsoft') {
-      console.log('[MC] 使用微软账号登录，首次运行需在终端完成浏览器授权')
+      info('[MC] 使用微软账号登录，首次运行需在终端完成浏览器授权')
     }
 
     this.bot = mineflayer.createBot(options)
@@ -64,13 +114,16 @@ export default class MinecraftBot {
     this._suppressProtocolErrors()
 
     this.bot.on('login', () => {
-      console.log(`[MC] Logged in as ${this.bot!.username}`)
+      const ver = this.bot!.version
+      info(`[MC] Logged in as ${this.bot!.username} (协议 ${ver})`)
     })
 
     this.bot.on('spawn', () => {
-      console.log('[MC] Bot spawned in world')
+      info('[MC] Bot spawned in world')
       this.isReady = true
       this.reconnectScheduled = false
+      this.lastKeepAliveAt = Date.now()
+      this._startKeepAliveMonitor()
       if (this.messageQueue) {
         this.messageQueue.setBot(this)
       }
@@ -82,8 +135,9 @@ export default class MinecraftBot {
 
     this.bot.on('kicked', (reason) => {
       const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason)
-      console.log('[MC] Kicked:', reasonStr)
+      warn('[MC] Kicked:', reasonStr)
       this.isReady = false
+      this._stopKeepAliveMonitor()
       this.acceptedResourcePacks.clear()
       setTimeout(() => this._handleReconnect(reasonStr.includes('spam') ? 'spam踢出' : '被踢出'), 1000)
     })
@@ -96,7 +150,22 @@ export default class MinecraftBot {
           err.message.includes('configuration'))) {
         return
       }
-      console.error('[MC] Error:', err.message)
+
+      // 认证/profile 错误：微软 token 过期或 Mojang API 暂时不可用，自动重试
+      if (err.message && (err.message.includes('Failed to obtain profile data') ||
+          err.message.includes('profile data'))) {
+        warn('[MC] 认证错误:', err.message)
+        if (this.config.auth === 'microsoft') {
+          warn('[MC] 微软账号 token 可能已过期，若持续失败请删除',
+            this.config.profilesFolder || './mc-tokens',
+            '后重新运行以重新授权')
+        }
+        this.isReady = false
+        this._handleReconnect('认证失败')
+        return
+      }
+
+      error('[MC] Error:', err.message)
 
       if (err.message.includes('fetch failed') || err.message.includes('Sign in failed')) {
         console.error('[MC] 登录失败提示:')
@@ -115,18 +184,19 @@ export default class MinecraftBot {
     })
 
     getBotClient(this.bot)?.on('add_resource_pack', (data: unknown) => {
-      console.log('[MC] add_resource_pack received')
+      debug('[MC] add_resource_pack received')
       this._acceptResourcePackOnce(String((data as { uuid?: string }).uuid || ''))
     })
 
     getBotClient(this.bot)?.on('resource_pack_send', (data: unknown) => {
-      console.log('[MC] resource_pack_send received')
+      debug('[MC] resource_pack_send received')
       this._acceptResourcePackOnce(String((data as { uuid?: string }).uuid || ''))
     })
 
     this.bot.on('end', (reason) => {
-      console.log('[MC] Disconnected:', reason)
+      warn('[MC] Disconnected:', reason)
       this.isReady = false
+      this._stopKeepAliveMonitor()
       this.acceptedResourcePacks.clear()
       this._handleReconnect('连接断开')
     })
@@ -183,18 +253,18 @@ export default class MinecraftBot {
 
   private _handleResourcePack (url: string, hash: { ascii?: string } | string): void {
     if (!this.bot) return
-    console.log('[MC] Resource pack received')
+    debug('[MC] Resource pack received')
     const hashObj = typeof hash === 'object' ? hash : { ascii: String(hash) }
     const packKey = String(hashObj?.ascii || hash || url || '')
 
     if (packKey && this.acceptedResourcePacks.has(packKey)) {
-      console.log('[MC] Resource pack already accepted')
+      debug('[MC] Resource pack already accepted')
       return
     }
 
     try {
       const uuidStr = hashObj?.ascii ? hashObj.ascii : String(hash || '')
-      console.log('[MC] Pack UUID:', uuidStr)
+      debug('[MC] Pack UUID:', uuidStr)
 
       const statuses: Array<[string, number]> = [
         ['ACCEPTED', 3],
@@ -210,7 +280,7 @@ export default class MinecraftBot {
             uuid: uuidStr,
             result: result
           })
-          console.log(`[MC] Resource pack ${label} sent`)
+          debug(`[MC] Resource pack ${label} sent`)
         } catch (err) {
           console.error(`[MC] Resource pack ${label} failed:`, (err as Error).message)
         }
@@ -219,7 +289,7 @@ export default class MinecraftBot {
       if (packKey) {
         this.acceptedResourcePacks.add(packKey)
       }
-      console.log('[MC] Resource pack response completed')
+      debug('[MC] Resource pack response completed')
 
       // If bot doesn't spawn within 30s of resource pack, force reconnect
       const spawnTimeout = setTimeout(() => {
@@ -244,28 +314,128 @@ export default class MinecraftBot {
     this._handleResourcePack('', uuid)
   }
 
+  private _startKeepAliveMonitor (): void {
+    this._stopKeepAliveMonitor()
+    // 每 10s 检查距上次收到服务端包已多久。超过 15s 说明事件循环可能被阻塞
+    // （路径规划、大量区块加载等会推迟 keep-alive 响应，导致服务端踢人）
+    this.kaMonitor = setInterval(() => {
+      if (!this.bot) return
+      const botAny = this.bot as unknown as { _lastKeepAlive?: number }
+      const lastKa = botAny._lastKeepAlive
+      if (!lastKa) return
+      const ago = Date.now() - lastKa
+      if (ago > 15000) {
+        warn(`[MC] ⚠ 距上次服务端包已 ${(ago / 1000).toFixed(0)}s，事件循环可能阻塞！`)
+      }
+    }, 10000)
+    this.kaMonitor.unref?.()
+  }
+
+  private _stopKeepAliveMonitor (): void {
+    if (this.kaMonitor) { clearInterval(this.kaMonitor); this.kaMonitor = null }
+  }
+
   private _handleReconnect (reason: string): void {
+    if (this.stopped) return
     if (this.reconnectScheduled) return
     this.reconnectScheduled = true
+    this._stopKeepAliveMonitor()
     const delay = reason.includes('spam') ? 30000 : this.reconnectDelay
-    console.log(`[MC] ${reason} - 等待 ${delay / 1000} 秒后重连...`)
+    warn(`[MC] ${reason} - 等待 ${delay / 1000} 秒后重连...`)
 
     setTimeout(() => {
       this.reconnectScheduled = false
-      console.log('[MC] Reconnecting...')
+      info('[MC] Reconnecting...')
       this.create()
     }, delay)
   }
 
   chat (message: string): boolean {
     if (!this.isReady || !this.bot) return false
-    this.bot.chat(message)
+    if (this.messageQueue) {
+      this.messageQueue.enqueue(message)
+    } else {
+      this.bot.chat(message)
+    }
     return true
   }
 
   whisper (username: string, message: string): boolean {
     if (!this.isReady || !this.bot) return false
-    this.bot.chat(`${this.whisperCommand} ${username} ${message}`)
+    const full = `${this.whisperCommand} ${username} ${message}`
+    if (this.messageQueue) {
+      this.messageQueue.enqueue(full)
+    } else {
+      this.bot.chat(full)
+    }
     return true
+  }
+
+  /** 队列专用：跳过消息队列，直接把消息发给服务器（由 MessageQueue 的 process 在间隔后调用） */
+  sendRaw (message: string): void {
+    if (this.isReady && this.bot) {
+      try { this.bot.chat(message) } catch { /* */ }
+    }
+  }
+
+  /** 当前请求的视距（区块）。供区块裁剪等外部模块使用。 */
+  getViewDistance (): number {
+    return this.currentViewDistance
+  }
+
+  /** Dynamically switch view distance (chunks). Sends settings packet to server. */
+  setViewDistance (n: number): void {
+    if (!this.isReady || !this.bot || this.currentViewDistance === n) return
+    try {
+      this.bot.setSettings({ viewDistance: n })
+      this.currentViewDistance = n
+      debug(`[MC] View distance → ${n}`)
+    } catch { /* */ }
+  }
+
+  /** 破基岩模式开启/关闭。开启时视距固定 breakViewDistance() 并占住高位请求；关闭后按常规回落。 */
+  setBreakViewActive (active: boolean): void {
+    if (this.breakViewActive === active) return
+    this.breakViewActive = active
+    if (active) {
+      this.setViewDistance(breakViewDistance())
+    } else {
+      this._dropToBaseView()
+    }
+  }
+
+  /** Request high view distance. Called on jump/place/use/look. Auto-releases after 15s idle. */
+  requestHighView (): void {
+    if (this.highViewRequests === 0) {
+      this.setViewDistance(this.breakViewActive ? breakViewDistance() : highViewDistance())
+    }
+    this.highViewRequests++
+    this._resetHighViewTimer()
+  }
+
+  /** Release high view distance request. When all released, drops to base. */
+  releaseHighView (): void {
+    if (this.highViewRequests > 0) this.highViewRequests--
+    if (this.highViewRequests <= 0) {
+      this.highViewRequests = 0
+      if (this.highViewTimer) { clearTimeout(this.highViewTimer); this.highViewTimer = null }
+      this._dropToBaseView()
+    }
+  }
+
+  /** 刷新高位保持定时器。连续高频调用（如跳跃循环）只会续期，不会造成计数泄漏。 */
+  private _resetHighViewTimer (): void {
+    if (this.highViewTimer) clearTimeout(this.highViewTimer)
+    this.highViewTimer = setTimeout(() => {
+      // 15 秒内无新请求 → 所有持有视为过期，直接归零回落，防止计数泄漏把视距永久钉在高位
+      this.highViewRequests = 0
+      this.highViewTimer = null
+      this._dropToBaseView()
+    }, 15000)
+  }
+
+  /** 无高位请求时的回落视距：破基岩模式保持 breakViewDistance()，否则回落 6。 */
+  private _dropToBaseView (): void {
+    this.setViewDistance(this.breakViewActive ? breakViewDistance() : 6)
   }
 }

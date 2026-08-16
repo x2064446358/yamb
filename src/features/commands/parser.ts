@@ -20,19 +20,21 @@ export function parsePrefixedArgs (text: string, prefix: string): string[] {
 }
 
 export const KNOWN_COMMANDS = new Set([
-  'phome', 'lock', 'unlock', 'add', 'remove', 'status', 'say', 'forward',
+  'lock', 'unlock', 'add', 'remove', 'status', 'say', 'forward',
   'mount', '坐', 'unmount', '下车', '蹲下', 'cart', 'attack', 'container',
   'inv', 'store', 'take', 'drop',
   '挂机', '锁定', '解锁', '改锁定', '解锁all', '状态', '状态2', '状态3', '上车',
   '加白名单', '移除白名单', '白名单列表',
-  '加管理员', '移除管理员', '管理员列表',
-  '超管', '超管列表',
   '加phome白名单', '移除phome白名单', 'phome白名单列表',
+  '加phome超管', '移除phome超管', 'phome超管列表',
   '加phome点', '移除phome点',
-  '加黑', '黑名单',
+  '加黑',
   '丢弃', '丢弃全部', '手持',
-  'use', 'place', 'look',
+  '使用', 'place', '放置', 'look', '看向', '装水', 'fillwater',
   '跳跃', '查', '指令', '指令循环',
+  'help', '帮助',
+  'brew', '酿酒', 'node', '定时',
+  '加酿酒白名单', '移除酿酒白名单', '酿酒白名单列表',
   'dropall', 'hold', 'ride', 'xjump', 'xlook', 'xplace', 'xexec', 'xloop', 'xenchant',
   'xblacklist', 'xpwl', 'afk', 'afkhere',
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -40,6 +42,7 @@ export const KNOWN_COMMANDS = new Set([
 ])
 
 export function isKnownCommand (cmd: string): boolean {
+  if (/^\d+$/.test(cmd)) return true // 数字命令（phome 编号快捷，私聊 1-n 直传）
   return KNOWN_COMMANDS.has(cmd.toLowerCase())
 }
 
@@ -59,7 +62,7 @@ export function parsePublicCommand (text: string, prefix: string): string[] | nu
   return args
 }
 
-export type CommandSource = 'chat' | 'whisper'
+export type CommandSource = 'chat' | 'whisper' | 'console'
 
 export function parseCommandInput (
   text: string,

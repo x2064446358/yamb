@@ -6,6 +6,7 @@ import createGameRoutes from './routes/game'
 import type TeleportService from '../features/teleport/service'
 import type GameApiService from './game-service'
 import type Whitelist from '../permissions/whitelist'
+import { debug } from '../platform/logger'
 
 export default class AstrbotServer {
   private config: AstrbotConfig
@@ -47,7 +48,7 @@ export default class AstrbotServer {
   start (): Promise<void> {
     return new Promise((resolve) => {
       this.server = this.app.listen(this.config.port, () => {
-        console.log(`[AstrBot] API server listening on port ${this.config.port}`)
+        debug(`[AstrBot] API server listening on port ${this.config.port}`)
         resolve()
       })
     })

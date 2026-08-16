@@ -3,10 +3,11 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { BotBehaviorConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type PlayerInteractionService from '../../actions/player'
+import { debug, warn } from '../../platform/logger'
 import {
   clearVehicleState,
-  isMountedOnMinecart,
   isMountedOnPlayer,
+  isMountedOnVehicle,
   performDismount
 } from '../../actions/shared/entity-utils'
 import { sleep } from '../../platform/sleep'
@@ -89,7 +90,7 @@ export default class RidingManager {
     this.dismountRequested = false
     this.notMountedStreak = 0
     this.saveRidingState()
-    console.log(`[Riding] 进入骑乘模式 -> ${playerName}`)
+    debug(`[Riding] 进入骑乘模式 -> ${playerName}`)
   }
 
   enterMinecartMode (): void {
@@ -98,12 +99,12 @@ export default class RidingManager {
     this.dismountRequested = false
     this.notMountedStreak = 0
     this.saveRidingState()
-    console.log('[Riding] 进入矿车模式')
+    debug('[Riding] 进入矿车模式')
   }
 
   clearMode (): void {
     if (this.mode === 'idle') return
-    console.log(`[Riding] 退出 ${this.mode} 模式`)
+    debug(`[Riding] 退出 ${this.mode} 模式`)
     this.mode = 'idle'
     this.targetPlayer = null
     this.dismountRequested = false
@@ -148,7 +149,7 @@ export default class RidingManager {
       if (entity !== bot.entity) return
       this.dismountRequested = false
       this.notMountedStreak = 0
-      console.log(`[Riding] entityAttach -> ${vehicle.name || vehicle.username || vehicle.id}`)
+      debug(`[Riding] entityAttach -> ${vehicle.name || vehicle.username || vehicle.id}`)
     })
 
     bot.on('entityDetach', (entity: Entity) => {
@@ -175,7 +176,7 @@ export default class RidingManager {
       return isMountedOnPlayer(bot, this.targetPlayer)
     }
     if (this.mode === 'minecart') {
-      return isMountedOnMinecart(bot)
+      return isMountedOnVehicle(bot)
     }
     return false
   }
@@ -236,12 +237,12 @@ export default class RidingManager {
       return
     }
 
-    console.log(`[Riding] 已脱离 ${targetName}，尝试重新骑乘（最多 4 次）`)
+    debug(`[Riding] 已脱离 ${targetName}，尝试重新骑乘（最多 4 次）`)
     this.dismountRequested = true
 
     for (let attempt = 1; attempt <= 4; attempt++) {
       if (this.mode !== 'player' || this.targetPlayer !== targetName) {
-        console.log('[Riding] 用户已取消骑乘，停止重试')
+        debug('[Riding] 用户已取消骑乘，停止重试')
         return
       }
       this.notMountedStreak = 0
@@ -251,10 +252,10 @@ export default class RidingManager {
       if (!mounted) {
         mounted = await this.playerInteraction.remountPlayer(targetName)
         if (mounted) {
-          console.log(`[Riding] 重新骑乘 ${targetName} 成功 (第 ${attempt} 次)`)
+          debug(`[Riding] 重新骑乘 ${targetName} 成功 (第 ${attempt} 次)`)
         }
       } else {
-        console.log(`[Riding] 已在 ${targetName} 上，无需重骑`)
+        debug(`[Riding] 已在 ${targetName} 上，无需重骑`)
       }
 
       if (mounted) {
@@ -265,18 +266,18 @@ export default class RidingManager {
           this.mcBot.chat('/afk')
           return
         }
-        console.log(`[Riding] 稳定期间脱落，继续重试`)
+        debug(`[Riding] 稳定期间脱落，继续重试`)
       } else {
-        console.log(`[Riding] 重新骑乘失败 (${attempt}/4)`)
+        debug(`[Riding] 重新骑乘失败 (${attempt}/4)`)
       }
 
       if (attempt < 4) await sleep(1500)
     }
 
-    console.log(`[Riding] 4 次重骑均失败`)
+    debug(`[Riding] 4 次重骑均失败`)
     try { this.mcBot.chat(`/msg ${targetName} 重新骑乘失败，请重新发送 坐 指令`) } catch { /* */ }
     if (!this.isLocked() && !this.isAtBase()) {
-      console.log(`[Riding] 执行 ${this.homeCommand}`)
+      debug(`[Riding] 执行 ${this.homeCommand}`)
       this.mcBot.chat(this.homeCommand)
     }
     this.clearMode()
@@ -306,13 +307,13 @@ export default class RidingManager {
         this.targetPlayer = row.target_player
         this.dismountRequested = false
         this.notMountedStreak = 0
-        console.log(`[Riding] 恢复骑乘状态 -> ${row.target_player}`)
+        debug(`[Riding] 恢复骑乘状态 -> ${row.target_player}`)
       } else if (row.mode === 'minecart') {
         this.mode = 'minecart'
         this.targetPlayer = null
         this.dismountRequested = false
         this.notMountedStreak = 0
-        console.log('[Riding] 恢复矿车模式')
+        debug('[Riding] 恢复矿车模式')
       }
     } catch { /* */ }
   }
@@ -323,24 +324,24 @@ export default class RidingManager {
     await sleep(2000)
 
     if (this.mode === 'player' && this.targetPlayer) {
-      console.log(`[Riding] 尝试重连骑乘 ${this.targetPlayer}...`)
+      debug(`[Riding] 尝试重连骑乘 ${this.targetPlayer}...`)
       for (let attempt = 1; attempt <= 4; attempt++) {
         this.notMountedStreak = 0
         const remounted = await this.playerInteraction.remountPlayer(this.targetPlayer)
         if (remounted) {
-          console.log(`[Riding] 重连骑乘 ${this.targetPlayer} 成功 (第 ${attempt} 次)`)
+          debug(`[Riding] 重连骑乘 ${this.targetPlayer} 成功 (第 ${attempt} 次)`)
           this.dismountRequested = false
           this.mcBot.chat('/afk')
           return
         }
-        console.log(`[Riding] 重连骑乘失败 (${attempt}/4)`)
+        debug(`[Riding] 重连骑乘失败 (${attempt}/4)`)
         if (attempt < 4) await sleep(1500)
       }
-      console.log(`[Riding] 4 次重连骑乘均失败，清除状态`)
+      debug(`[Riding] 4 次重连骑乘均失败，清除状态`)
       try { this.mcBot.chat(`/msg ${this.targetPlayer} 重新骑乘失败，请重新发送 坐 指令`) } catch { /* */ }
       this.clearMode()
     } else if (this.mode === 'minecart') {
-      console.log('[Riding] 矿车模式需手动上车恢复')
+      debug('[Riding] 矿车模式需手动上车恢复')
       this.clearMode()
     }
     this.dismountRequested = false

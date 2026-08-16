@@ -43,11 +43,10 @@ export default class TeleportIncomingHandler {
 
     this.standby.touch()
 
-    const isLockedPlayer = this.teleportService.isLocked() &&
-      this.teleportService.getLockedBy()?.toLowerCase() === request.playerName.toLowerCase()
     const isAdmin = this.isAdmin(request.playerName)
+    const isWhitelisted = this.whitelist.isAllowed(request.playerName)
 
-    if (!isAdmin && !this.teleportService.canAcceptRequest(request.type, isLockedPlayer ? request.playerName : undefined)) {
+    if (!isAdmin && !this.teleportService.canAcceptRequest(request.type, request.playerName, isWhitelisted)) {
       void this.teleportService.denyRequest(request.playerName)
       if (this.teleportService.isLocked()) {
         this.notifyLocked(request.playerName)
@@ -76,7 +75,7 @@ export default class TeleportIncomingHandler {
     this._lastLockNotify = { key: dedupeKey, time: now }
 
     const message = this.messages.text('lockedBlocked', { lockedBy })
-    this.mcBot.whisper(playerName, `#d9afd9${message}`)
+    this.mcBot.whisper(playerName, message)
     console.log(`[Teleport] 锁定拒绝 -> 通知 ${playerName} (锁定者: ${lockedBy})`)
   }
 }

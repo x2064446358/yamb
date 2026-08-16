@@ -1,6 +1,12 @@
 import type { MessageQueueConfig, QueueStatus, QueueTask } from '../types'
 import type MinecraftBot from './minecraft-bot'
 
+/**
+ * 消息队列：所有 chat/whisper 统一入队，串行 + 间隔发送，防刷屏限速。
+ * - 满则丢弃（maxSize）
+ * - 与上一条相同则跳过（去重）
+ * - 每条间隔 delayMs
+ */
 export default class MessageQueue {
   private queue: QueueTask[] = []
   private isProcessing = false
@@ -59,8 +65,8 @@ export default class MessageQueue {
 
     setTimeout(() => {
       try {
-        if (this.bot?.chat) {
-          this.bot.chat(task.message)
+        if (this.bot?.sendRaw) {
+          this.bot.sendRaw(task.message)
           console.log(`[Queue] 发送消息: ${task.message} (来自: ${task.sender || '系统'})`)
         } else {
           console.warn('[Queue] Bot未就绪，消息丢弃:', task.message)

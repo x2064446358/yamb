@@ -1,5 +1,6 @@
 import type { Bot } from 'mineflayer'
 import type { ServiceResult } from '../../types'
+import { debug } from '../../platform/logger'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import { sleep } from '../../platform/sleep'
 import {
@@ -7,7 +8,8 @@ import {
   entityDistance,
   entityLookPoint,
   getPlayerEntity,
-  isMountedOnPlayer
+  isMountedOnPlayer,
+  lookAtSmart
 } from '../shared/entity-utils'
 
 export default class PlayerInteractionService {
@@ -96,19 +98,19 @@ export default class PlayerInteractionService {
         const mounted = await this.tryMountPlayer(bot, targetName)
         const distance = entityDistance(bot, getPlayerEntity(bot, targetName) ?? entity).toFixed(1)
         if (mounted) {
-          console.log(`[Interaction] 骑乘 ${targetName} 成功 (距离 ${distance})`)
+          debug(`[Interaction] 骑乘 ${targetName} 成功 (距离 ${distance})`)
           return { success: true, message: `已骑乘 ${targetName}` }
         }
-        console.log(`[Interaction] 骑乘 ${targetName} 失败 (距离 ${distance})`)
+        debug(`[Interaction] 骑乘 ${targetName} 失败 (距离 ${distance})`)
         return { success: false, message: `未能骑乘 ${targetName}，请确认距离与服务器插件支持` }
       }
 
       const target = getPlayerEntity(bot, targetName) ?? entity
       const lookPoint = entityLookPoint(target)
-      await bot.lookAt(lookPoint, true)
+      await lookAtSmart(bot, lookPoint)
       await sleep(200)
       bot.attack(target)
-      console.log(`[Interaction] 攻击 ${targetName}`)
+      debug(`[Interaction] 攻击 ${targetName}`)
       return { success: true, message: `已攻击 ${targetName}` }
     } catch (err) {
       console.error(`[Interaction] ${action} 失败:`, (err as Error).message)
@@ -130,12 +132,12 @@ export default class PlayerInteractionService {
       await sleep(400)
 
       if (isMountedOnPlayer(bot, targetName)) {
-        console.log(`[Interaction] 骑乘确认成功 (第 ${attempt} 次交互)`)
+        debug(`[Interaction] 骑乘确认成功 (第 ${attempt} 次交互)`)
         return true
       }
 
       if (attempt < maxAttempts) {
-        console.log(`[Interaction] 未骑乘，重试 activateEntityAt (${attempt}/${maxAttempts})`)
+        debug(`[Interaction] 未骑乘，重试 activateEntityAt (${attempt}/${maxAttempts})`)
         await sleep(250)
       }
     }

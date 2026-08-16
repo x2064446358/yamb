@@ -1,4 +1,5 @@
 import type MinecraftBot from '../../platform/minecraft-bot'
+import { debug } from '../../platform/logger'
 
 export interface LoopCmdConfig {
   enabled: boolean
@@ -27,14 +28,14 @@ export default class LoopCmd {
       }
     }, ms)
     this.active = true
-    console.log(`[LoopCmd] "${this.config.text}" every ${this.config.intervalSec}s`)
+    debug(`[LoopCmd] "${this.config.text}" every ${this.config.intervalSec}s`)
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null }
     this.active = false
     this.config.enabled = false
-    console.log('[LoopCmd] Stopped')
+    debug('[LoopCmd] Stopped')
   }
 
   update(text: string, intervalSec: number): void {

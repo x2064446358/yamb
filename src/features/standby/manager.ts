@@ -2,6 +2,7 @@ import type { BotBehaviorConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import { eatGoldenCarrotsUntilFull } from './food'
 import { sleep } from '../../platform/sleep'
+import { error } from '../../platform/logger'
 
 import type RidingManager from '../riding/manager'
 
@@ -9,6 +10,7 @@ export default class StandbyManager {
   private mcBot: MinecraftBot
   private ridingManager: RidingManager | null = null
   private isLocked: () => boolean = () => false
+  private isBusy: () => boolean = () => false
   private idleTimeoutMs: number
   private homeCommand: string
   private afkCommand: string
@@ -42,6 +44,11 @@ export default class StandbyManager {
     this.isLocked = fn
   }
 
+  /** 酿酒等长任务进行中时跳过回家待命与 AFK */
+  setBusyChecker (fn: () => boolean): void {
+    this.isBusy = fn
+  }
+
   setBaseArea (minX: number, maxX: number, minZ: number, maxZ: number): void {
     this.baseMinX = minX
     this.baseMaxX = maxX
@@ -63,7 +70,6 @@ export default class StandbyManager {
     this.checkTimer = setInterval(() => {
       void this.checkIdle()
     }, this.checkIntervalMs)
-    console.log(`[Standby] 空闲 ${this.idleTimeoutMs / 1000}s 后自动回家`)
   }
 
   stop (): void {
@@ -85,9 +91,8 @@ export default class StandbyManager {
     if (this.afkTimer) clearTimeout(this.afkTimer)
     this.afkTimer = setTimeout(() => {
       if (this.ridingManager?.isActive()) return
-      if (this.mcBot.chat(this.afkCommand)) {
-        console.log(`[Standby] 执行 ${this.afkCommand}`)
-      }
+      if (this.isBusy()) return
+      this.mcBot.chat(this.afkCommand)
     }, this.afkDelayMs)
   }
 
@@ -95,6 +100,7 @@ export default class StandbyManager {
     if (!this.mcBot.isReady || this.goingHome) return
     if (this.ridingManager?.isActive()) return
     if (this.isLocked()) return
+    if (this.isBusy()) return
     if (Date.now() - this.lastActivity < this.idleTimeoutMs) return
     await this.goHomeStandby()
   }
@@ -102,14 +108,14 @@ export default class StandbyManager {
   async goHomeStandby (): Promise<void> {
     if (!this.mcBot.isReady || !this.mcBot.bot || this.goingHome) return
     if (this.ridingManager?.isActive()) return
+    if (this.isBusy()) return
 
     this.goingHome = true
 
     try {
       if (this.isAtBase()) {
-        console.log(`[Standby] 已在基地，跳过 ${this.homeCommand}`)
+        // at base, skip home
       } else {
-        console.log(`[Standby] 超过 ${this.idleTimeoutMs / 1000}s 无互动，执行 ${this.homeCommand}`)
         this.mcBot.chat(this.homeCommand)
         await sleep(this.homeWaitMs)
       }
@@ -121,7 +127,7 @@ export default class StandbyManager {
       this.scheduleAfk()
       this.touch()
     } catch (err) {
-      console.error('[Standby] 回家待命失败:', (err as Error).message)
+      error('[Standby] 回家待命失败:', (err as Error).message)
     } finally {
       this.goingHome = false
     }

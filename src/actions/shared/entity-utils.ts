@@ -3,6 +3,7 @@ import type { Bot } from 'mineflayer'
 import { pathfinder, Movements, goals } from 'mineflayer-pathfinder'
 import type { ServiceResult } from '../../types'
 import { sleep } from '../../platform/sleep'
+import { debug } from '../../platform/logger'
 
 type Entity = NonNullable<Bot['entities'][string]>
 
@@ -10,12 +11,14 @@ export type BotWithPathfinder = Bot & {
   _mchatbotPathfinderReady?: boolean
   pathfinder: {
     setMovements: (movements: Movements) => void
-    goto: (goal: goals.GoalNear) => Promise<void>
+    goto: (goal: goals.GoalNear | goals.GoalLookAtBlock | goals.GoalBlock) => Promise<void>
     stop: () => void
   }
 }
 
 type EntityWithVehicle = Entity & { vehicle?: Entity | null; passengers?: Entity[] }
+
+type EntityWithEyeHeight = Entity & { eyeHeight: number }
 
 export type BotWithVehicle = Bot & { vehicle?: Entity | null }
 
@@ -23,7 +26,13 @@ export function ensurePathfinder (bot: Bot): BotWithPathfinder {
   const b = bot as BotWithPathfinder
   if (!b._mchatbotPathfinderReady) {
     bot.loadPlugin(pathfinder)
-    b.pathfinder.setMovements(new Movements(bot))
+    const movements = new Movements(bot)
+    // 在玩家基地内寻路：不挖方块、不搭柱子，绕障碍走，避免破坏建筑/卡在挖掘
+    movements.canDig = false
+    movements.allow1by1towers = false
+    movements.allowParkour = true
+    movements.allowSprinting = true
+    b.pathfinder.setMovements(movements)
     b._mchatbotPathfinderReady = true
   }
   return b
@@ -56,6 +65,60 @@ export function getEntityVehicle (bot: Bot): Entity | null {
   return (bot.entity as EntityWithVehicle).vehicle ?? null
 }
 
+/**
+ * 骑乘时 mineflayer 会把内部 shouldUsePhysics 置 false，物理循环不再发送 look 包，
+ * bot.look()/lookAt() 只更新本地朝向、服务端视角不变。此函数直接向服务端写 look 包绕开该限制。
+ */
+export function lookAtMounted (bot: Bot, point: Vec3): Promise<void> {
+  const eye = (bot.entity as EntityWithEyeHeight).eyeHeight ?? bot.entity.height * 0.9
+  const delta = point.minus(bot.entity.position.offset(0, eye, 0))
+  const yaw = Math.atan2(-delta.x, -delta.z)
+  const groundDistance = Math.sqrt(delta.x * delta.x + delta.z * delta.z)
+  const pitch = Math.atan2(delta.y, groundDistance)
+
+  bot.entity.yaw = yaw
+  bot.entity.pitch = pitch
+
+  bot._client.write('look', {
+    yaw: Math.fround((Math.PI - yaw) * (180 / Math.PI)),
+    pitch: Math.fround(-pitch * (180 / Math.PI)),
+    onGround: bot.entity.onGround,
+    flags: { onGround: bot.entity.onGround, hasHorizontalCollision: undefined }
+  })
+  return Promise.resolve()
+}
+
+/** 朝向统一入口：骑乘时直写 look 包，否则走标准 bot.lookAt */
+export function lookAtSmart (bot: Bot, point: Vec3, force = true): Promise<void> {
+  if (getVehicle(bot) || getEntityVehicle(bot)) {
+    return lookAtMounted(bot, point)
+  }
+  return bot.lookAt(point, force)
+}
+
+/** bot 眼睛高度（mineflayer 类型未声明 eyeHeight，运行时存在） */
+export function eyeHeightOf (bot: Bot): number {
+  return (bot.entity as EntityWithEyeHeight).eyeHeight ?? bot.entity.height * 0.9
+}
+
+/**
+ * 按角度看向（F3 风格：横 = 方位角 yaw，纵 = 俯仰角 pitch）。
+ * 换算成目标点后走 lookAtSmart（骑乘时直写 look 包），并返回该目标点供 place 复用。
+ */
+export function lookAnglesSmart (bot: Bot, yawDeg: number, pitchDeg: number, distance = 4): Vec3 {
+  const yaw = Math.PI - (yawDeg * Math.PI) / 180
+  const pitch = (-pitchDeg * Math.PI) / 180
+  const eye = bot.entity.position.offset(0, eyeHeightOf(bot), 0)
+  const dir = new Vec3(
+    -Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    -Math.cos(yaw) * Math.cos(pitch)
+  )
+  const target = eye.plus(dir.scaled(distance))
+  void lookAtSmart(bot, target)
+  return target
+}
+
 export function clearVehicleState (bot: Bot): void {
   ;(bot as BotWithVehicle).vehicle = null
   if (bot.entity) {
@@ -63,9 +126,26 @@ export function clearVehicleState (bot: Bot): void {
   }
 }
 
+const NON_RIDEABLE_MINECARTS = [
+  'chest_minecart', 'furnace_minecart', 'hopper_minecart',
+  'tnt_minecart', 'command_block_minecart', 'spawner_minecart'
+]
+
 export function isMinecartEntity (entity: Entity): boolean {
   const name = String(entity.name || entity.displayName || '').toLowerCase()
+  if (NON_RIDEABLE_MINECARTS.includes(name)) return false
   return name.includes('minecart')
+}
+
+/** 可骑乘实体：基础矿车 / 船 / 马(驴/骡) / 猪 —— 排除漏斗矿车、箱子矿车等不能坐的 */
+export function isRideableEntity (entity: Entity): boolean {
+  const name = String(entity.name || entity.displayName || '').toLowerCase()
+  if (NON_RIDEABLE_MINECARTS.includes(name)) return false
+  if (name.includes('minecart')) return true
+  if (name.includes('boat')) return true
+  if (name.includes('horse') || name === 'donkey' || name === 'mule') return true
+  if (name === 'pig') return true
+  return false
 }
 
 export function isAreaEffectCloudEntity (entity: Entity): boolean {
@@ -119,6 +199,13 @@ export function isMountedOnMinecart (bot: Bot): boolean {
   return entityDistance(bot, vehicle) < 2.5
 }
 
+/** 是否正骑乘任意可骑乘实体（矿车/船/马/猪） */
+export function isMountedOnVehicle (bot: Bot): boolean {
+  const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
+  if (!vehicle || !isRideableEntity(vehicle)) return false
+  return entityDistance(bot, vehicle) < 2.5
+}
+
 /** 离开插件 AEC 坐骑：以潜行为主（bot.dismount 对此类载具常报 not mounted） */
 export async function leavePluginSeat (bot: Bot): Promise<boolean> {
   for (let attempt = 1; attempt <= 5; attempt++) {
@@ -137,7 +224,7 @@ export async function leavePluginSeat (bot: Bot): Promise<boolean> {
     await sleep(250)
 
     if (!hasActiveVehicle(bot) && !isOnPluginCloudSeat(bot)) {
-      console.log(`[Riding] 已离开云座 (第 ${attempt} 次潜行)`)
+      debug(`[Riding] 已离开云座 (第 ${attempt} 次潜行)`)
       resumeBotPhysics(bot)
       return true
     }
@@ -181,7 +268,7 @@ export function resumeBotPhysics (bot: Bot): void {
       flags: { x: true, y: true, z: true, yaw: true, pitch: true },
       teleportId: 0
     })
-    console.log('[Physics] 已恢复物理结算')
+    debug('[Physics] 已恢复物理结算')
   } catch (err) {
     console.warn('[Physics] 恢复物理失败:', (err as Error).message)
   }
@@ -194,7 +281,7 @@ export function suspendBotPhysics (bot: Bot): void {
     bot.entity.velocity.set(0, 0, 0)
   }
   bot.physicsEnabled = false
-  console.log('[Physics] 已关闭物理结算（悬空）')
+  debug('[Physics] 已关闭物理结算（悬空）')
 }
 
 /**
@@ -291,13 +378,185 @@ export async function settleOnGround (bot: Bot): Promise<void> {
   bot.clearControlStates()
 }
 
+function isInWater (bot: Bot): boolean {
+  try {
+    const entity = bot.entity as { isInWater?: boolean }
+    if (entity.isInWater) return true
+    const feet = bot.blockAt(bot.entity.position)
+    if (feet && (feet.name === 'water' || feet.name === 'flowing_water')) return true
+    // 头部方块也判断：游泳时脚可能不在水里但头在水里
+    const head = bot.blockAt(bot.entity.position.offset(0, 1, 0))
+    return !!head && (head.name === 'water' || head.name === 'flowing_water')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 卡在水里：长按空格(跳跃=上浮) + 长按一个方向游，像真人一样持续按住
+ * 直到头/脚离开水域，再逐方向换向尝试靠岸。
+ */
+export async function escapeFromWater (bot: Bot): Promise<boolean> {
+  const start = bot.entity.position.clone()
+  const dirs: Array<'forward' | 'right' | 'back' | 'left'> = ['forward', 'right', 'back', 'left']
+  const HOLD_MS = 1_500
+  const CHECK_MS = 200
+
+  for (let i = 0; i < 8; i++) {
+    if (!isInWater(bot)) return true
+
+    const dir = dirs[i % dirs.length]
+    // 持续按住：空格上浮 + 方向键移动，长按不松开（水中长按空格=上浮）
+    bot.setControlState('jump', true)
+    bot.setControlState(dir, true)
+
+    const deadline = Date.now() + HOLD_MS
+    while (Date.now() < deadline) {
+      await sleep(CHECK_MS)
+      if (!isInWater(bot)) {
+        bot.clearControlStates()
+        return true
+      }
+      // 游动中已远离出发点，视为挣脱成功
+      if (bot.entity.position.distanceTo(start) > 2.5) {
+        bot.clearControlStates()
+        return true
+      }
+    }
+
+    // 换方向前短暂停顿，让 bot 稳定
+    bot.clearControlStates()
+    await sleep(150)
+  }
+  bot.clearControlStates()
+  return !isInWater(bot)
+}
+
+/**
+ * 挣脱卡位（如卡进炼药锅/墙角）：跳跃 + 前进/后/左右交替，检测位置是否移动。
+ * 返回是否成功移动。
+ */
+export async function escapeStuck (bot: Bot, attempts = 4): Promise<boolean> {
+  if (isInWater(bot)) return escapeFromWater(bot)
+
+  const start = bot.entity.position.clone()
+  const dirs: Array<'forward' | 'right' | 'back' | 'left'> = ['forward', 'right', 'back', 'left']
+  // 跳跃 + 前进（含对角线方向组合），先挣脱再判断
+  for (let i = 0; i < attempts * 2; i++) {
+    bot.setControlState('jump', true)
+    const dir = dirs[i % dirs.length]
+    bot.setControlState(dir, true)
+    // 对角线：同时按前+侧
+    if (i % 2 === 1 && dir !== 'back') {
+      bot.setControlState(dir === 'forward' ? 'right' : 'forward', true)
+    }
+    await sleep(600)
+    bot.clearControlStates()
+    await sleep(250)
+    if (bot.entity.position.distanceTo(start) > 0.8) return true
+  }
+  return false
+}
+
+/**
+ * 寻路到目标：带进度监控（位置持续不动判定卡住）与超时。
+ * 失败/卡住时先停止路径、再挣脱卡位/出水，然后重新寻路（最多 4 轮）。
+ * 返回是否已在 interactionDistance 内。
+ */
+export async function gotoWithEscape (
+  bot: Bot,
+  target: Vec3,
+  interactionDistance: number
+): Promise<ServiceResult> {
+  const pfBot = ensurePathfinder(bot)
+  const goal = new goals.GoalNear(
+    target.x,
+    target.y,
+    target.z,
+    Math.max(1, interactionDistance - 0.5)
+  )
+  const near = (): boolean =>
+    bot.entity.position.distanceTo(target) <= interactionDistance + 0.5
+
+  // 超时按距离估算：基础 6s + 每格 0.8s，上限 30s
+  const dist = bot.entity.position.distanceTo(target)
+  const GOTO_TIMEOUT_MS = Math.min(30_000, Math.max(8_000, 6_000 + dist * 800))
+  // 位置持续不动超过该时长视为卡住
+  const STUCK_MS = 4_000
+  const MOVE_EPS = 0.25
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (near()) return { success: true }
+
+    // 卡在水里先出水
+    if (isInWater(bot)) {
+      await escapeFromWater(bot)
+      await sleep(200)
+      if (near()) return { success: true }
+    }
+
+    let lastPos = bot.entity.position.clone()
+    let lastMoveAt = Date.now()
+    let gotoDone = false
+
+    try {
+      const gotoP = pfBot.pathfinder.goto(goal)
+      // 停止/超时后 goto 会以 PathStopped/GoalChanged 结束，立即记下，避免空等
+      gotoP.then(() => { gotoDone = true }).catch(() => { gotoDone = true })
+
+      // 进度监控：位置持续不动或到超时即中止等待
+      const deadline = Date.now() + GOTO_TIMEOUT_MS
+      while (!gotoDone && Date.now() < deadline) {
+        if (near()) { gotoDone = true; break }
+        await sleep(400)
+        const pos = bot.entity.position
+        if (pos.distanceTo(lastPos) > MOVE_EPS) {
+          lastPos = pos.clone()
+          lastMoveAt = Date.now()
+        } else if (Date.now() - lastMoveAt > STUCK_MS) {
+          gotoDone = true
+        }
+      }
+
+      await sleep(150)
+      if (near()) return { success: true }
+    } catch {
+      await sleep(200)
+      if (near()) return { success: true }
+    }
+
+    // 先停掉旧路径，避免挣脱/出水时与控制状态冲突
+    try { pfBot.pathfinder.stop() } catch { /* ignore */ }
+    bot.clearControlStates()
+    await sleep(300)
+    if (near()) return { success: true }
+
+    // 卡在水里：先出水再继续
+    if (isInWater(bot)) {
+      await escapeFromWater(bot)
+      await sleep(200)
+      if (near()) return { success: true }
+      continue
+    }
+
+    const escaped = await escapeStuck(bot)
+    await sleep(300)
+    if (near()) return { success: true }
+    if (!escaped) {
+      return { success: false, message: '无法接近目标: 位置被卡住，挣脱失败' }
+    }
+  }
+  if (near()) return { success: true }
+  return { success: false, message: '无法接近目标: 多次尝试失败' }
+}
+
 export async function approachEntity (
   bot: Bot,
   entity: Entity,
   interactionDistance: number,
   approachDistance: number
 ): Promise<ServiceResult> {
-  let distance = entityDistance(bot, entity)
+  const distance = entityDistance(bot, entity)
   if (distance > approachDistance) {
     return {
       success: false,
@@ -309,30 +568,7 @@ export async function approachEntity (
     return { success: true }
   }
 
-  const pfBot = ensurePathfinder(bot)
-  const goal = new goals.GoalNear(
-    entity.position.x,
-    entity.position.y,
-    entity.position.z,
-    Math.max(1, interactionDistance - 0.5)
-  )
-
-  try {
-    console.log(`[Approach] 接近目标 (${distance.toFixed(1)} -> ${interactionDistance} 格)`)
-    await pfBot.pathfinder.goto(goal)
-    await sleep(150)
-    distance = entityDistance(bot, entity)
-    if (distance > interactionDistance + 0.5) {
-      return {
-        success: false,
-        message: `无法进入交互距离 (当前 ${distance.toFixed(1)} 格，需要 ${interactionDistance} 格内)`
-      }
-    }
-    return { success: true }
-  } catch (err) {
-    pfBot.pathfinder.stop()
-    return { success: false, message: `无法接近目标: ${(err as Error).message}` }
-  }
+  return gotoWithEscape(bot, entity.position, interactionDistance)
 }
 
 export function findNearestEntity (

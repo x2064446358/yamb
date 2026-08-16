@@ -1,0 +1,138 @@
+{
+  "databaseFile": "./data/md/mchatbot.db",
+  "tpacceptCommand": "/tpaccept",
+  "tpdenyCommand": "/tpdeny",
+  "tpahereCommand": "/tpahere",
+  "phomeCommand": "/phome",
+  "waypointDelayMs": 3000,
+  "ownedIndices": [
+    21
+  ],
+  "waypoints": [
+    {
+      "id": "liang家",
+      "alias": "liang家",
+      "cmd": "/phome"
+    },
+    {
+      "id": "刷花",
+      "alias": "全种类刷花",
+      "cmd": "/phome"
+    },
+    {
+      "id": "渔场",
+      "alias": "渔场",
+      "cmd": "/phome"
+    },
+    {
+      "id": "百万史莱姆收集",
+      "alias": "史莱姆",
+      "cmd": "/phome"
+    },
+    {
+      "id": "鲫鱼本部",
+      "alias": "鲫鱼本部",
+      "cmd": "/ts"
+    },
+    {
+      "id": "刷铁区块",
+      "alias": "超级刷铁机",
+      "cmd": "/home"
+    },
+    {
+      "id": "72k刷冰机《阿梁激情建造》",
+      "alias": "刷冰机",
+      "cmd": "/phome"
+    },
+    {
+      "id": "平台多物品",
+      "alias": "平台",
+      "cmd": "/phome"
+    },
+    {
+      "id": "蜂厂",
+      "alias": "蜂厂",
+      "cmd": "/phome"
+    },
+    {
+      "id": "暖海平台",
+      "alias": "暖海",
+      "cmd": "/phome"
+    },
+    {
+      "id": "空置域收集",
+      "alias": "空置域",
+      "cmd": "/phome"
+    },
+    {
+      "id": "刷沙",
+      "alias": "刷沙",
+      "cmd": "/phome"
+    },
+    {
+      "id": "全物品",
+      "alias": "全物品",
+      "cmd": "/phome"
+    },
+    {
+      "id": "滴滴滴滴",
+      "alias": "合成站(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "船吸收集",
+      "alias": "船吸(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "猪人塔",
+      "alias": "猪人塔(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "刷沙",
+      "alias": "刷沙(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "多物品仓库",
+      "alias": "多物品仓库(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "贝贝场",
+      "alias": "潜影贝农场(结社)",
+      "cmd": "/phome"
+    },
+    {
+      "id": "",
+      "alias": "地狱全怪",
+      "cmd": "/home"
+    },
+    {
+      "id": "",
+      "alias": "二连女巫",
+      "cmd": "/home"
+    },
+    {
+      "id": "",
+      "alias": "510猪交",
+      "cmd": "/home"
+    },
+    {
+      "id": "9核壳厂",
+      "alias": "9核壳厂",
+      "cmd": "/phome"
+    },
+    {
+      "id": "",
+      "alias": "16核粘土机",
+      "cmd": "/home"
+    },
+    {
+      "id": "Y0猪人后面是到地狱端的传送门",
+      "alias": "Y0猪人",
+      "cmd": "/phome"
+    }
+  ]
+}

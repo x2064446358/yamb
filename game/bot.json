@@ -1,0 +1,23 @@
+{
+  "idleTimeoutMs": 90000,
+  "idleCheckIntervalMs": 10000,
+  "homeCommand": "/ts",
+  "afkCommand": "/afk",
+  "afkDelayMs": 2000,
+  "homeWaitMs": 3000,
+  "replyDelayMs": 500,
+  "interactionDistance": 3,
+  "approachDistance": 10,
+  "forwardWaitMs": 2000,
+  "ridingCheckIntervalMs": 1500,
+  "relockDistance": 6,
+  "relockCheckIntervalMs": 1000,
+  "loopCmdMaxIntervalSec": 3600,
+  "maxBlacklist": 50,
+  "maxPhomeWl": 30,
+  "baseCheckIntervalMs": 250,
+  "tpaCooldownMs": 5000,
+  "unlockAllTimeoutSec": 60,
+  "botName": "bot1",
+  "phomeDataFile": "phome_data.txt"
+}

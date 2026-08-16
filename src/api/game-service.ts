@@ -1,5 +1,6 @@
 import type { PlayersResult, ServiceResult, StatusResult } from '../types'
 import type MinecraftBot from '../platform/minecraft-bot'
+import { debug } from '../platform/logger'
 import type Whitelist from '../permissions/whitelist'
 
 export default class GameApiService {
@@ -17,7 +18,7 @@ export default class GameApiService {
     }
 
     this.mcBot.chat(message)
-    console.log(`[Command] Sent chat: ${message}`)
+    debug(`[Command] Sent chat: ${message}`)
     return { success: true, message: '已发送消息' }
   }
 
