@@ -1,0 +1,17 @@
+{
+  "mchatbot_api_url": {
+    "description": "mchatbot API地址",
+    "type": "string",
+    "default": "http://localhost:15100"
+  },
+  "mchatbot_api_key": {
+    "description": "mchatbot API密钥",
+    "type": "string",
+    "default": ""
+  },
+  "admin_qq_list": {
+    "description": "管理员QQ号列表，用逗号分隔",
+    "type": "string",
+    "default": ""
+  }
+}
