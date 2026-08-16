@@ -1,0 +1,14 @@
+{
+  "fermentation": {
+    "duration": "8m",
+    "ingredients": {
+      "竹子": 12,
+      "小麦": 4
+    }
+  },
+  "distillation": 1,
+  "aging": {
+    "days": 6,
+    "wood": "竹"
+  }
+}

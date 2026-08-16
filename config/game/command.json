@@ -1,0 +1,6 @@
+{
+  "prefix": "%",
+  "whisperCommand": "/msg",
+  "allowPublicCommands": true,
+  "replyAlwaysWhisper": true
+}
