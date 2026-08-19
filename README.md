@@ -61,6 +61,13 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 
 在 cmd.exe 中可用 `set DOTENV_CONFIG_PATH=.env.bot1 && npm run dev`；在 macOS / Linux 中使用 `DOTENV_CONFIG_PATH=.env.bot1 npm run dev`。
 
+Windows 也可以复制/直接使用通用模板 `start_bot.example.bat`，传入 bot 编号启动对应环境文件：
+
+```bat
+start_bot.example.bat 1
+start_bot.example.bat 2
+```
+
 或使用 `npm run start:all` / 双击 `start_all.bat` 一次启动全部 7 个 bot。每个环境文件应使用独立的 `MC_USERNAME`、`MC_PROFILES_FOLDER`、`BOT_NAME` 和 `BOT_INDEX`；使用同一账号重复启动会被拒绝。只有登记在 `phome_towns.json` 的 bot 才参与小镇委托。
 
 只运行两个 bot 时，分别启动 `.env.bot1` 和 `.env.bot2` 即可；同时在 `phome_towns.json` 的 `bots` 中保留这两个 bot，并让 `teleport.json` 的 `owner` 使用完全相同的 `BOT_NAME`。
