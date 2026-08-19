@@ -40,17 +40,17 @@ node dist/index.js
 
 ## 多 Bot 启动
 
-最多 7 个 bot 共用一份代码，各自加载不同的 `.env.botN`：
+最多 7 个 bot 共用一份代码，各自加载不同的 `.env.botN`。所有 bot 使用同一份传送点和数据库文件：
 
-| Bot | 配置文件 | 传送点文件 |
-|-----|---------|-----------|
-| Bot1 | `.env.bot1` | `teleport.json` |
-| Bot2 | `.env.bot2` | `teleport2.json` |
-| Bot3 | `.env.bot3` | `teleport3.json` |
-| Bot4 | `.env.bot4` | `teleport4.json` |
-| Bot5 | `.env.bot5` | `teleport5.json` |
-| Bot6 | `.env.bot6` | `teleport6.json` |
-| Bot7 | `.env.bot7` | `teleport7.json` |
+| Bot | 环境文件 | 身份字段 |
+|-----|---------|---------|
+| Bot1 | `.env.bot1` | `BOT_NAME` / `BOT_INDEX=1` |
+| Bot2 | `.env.bot2` | `BOT_NAME` / `BOT_INDEX=2` |
+| Bot3 | `.env.bot3` | `BOT_NAME` / `BOT_INDEX=3` |
+| Bot4 | `.env.bot4` | `BOT_NAME` / `BOT_INDEX=4` |
+| Bot5 | `.env.bot5` | `BOT_NAME` / `BOT_INDEX=5` |
+| Bot6 | `.env.bot6` | `BOT_NAME` / `BOT_INDEX=6` |
+| Bot7 | `.env.bot7` | `BOT_NAME` / `BOT_INDEX=7` |
 
 ```powershell
 # PowerShell：分别启动指定 bot
@@ -61,11 +61,15 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 
 在 cmd.exe 中可用 `set DOTENV_CONFIG_PATH=.env.bot1 && npm run dev`；在 macOS / Linux 中使用 `DOTENV_CONFIG_PATH=.env.bot1 npm run dev`。
 
-或使用 `npm run start:all` / 双击 `start_all.bat` 一次启动全部 7 个 bot。每个环境文件至少应有独立的 `MC_USERNAME`、`BOT_INDEX` 与 `BOT_TELEPORT_CONFIG`；使用同一账号重复启动会被拒绝。
+或使用 `npm run start:all` / 双击 `start_all.bat` 一次启动全部 7 个 bot。每个环境文件应使用独立的 `MC_USERNAME`、`MC_PROFILES_FOLDER`、`BOT_NAME` 和 `BOT_INDEX`；使用同一账号重复启动会被拒绝。只有登记在 `phome_towns.json` 的 bot 才参与小镇委托。
+
+只运行两个 bot 时，分别启动 `.env.bot1` 和 `.env.bot2` 即可；同时在 `phome_towns.json` 的 `bots` 中保留这两个 bot，并让 `teleport.json` 的 `owner` 使用完全相同的 `BOT_NAME`。
+
+旧版 `teleport2.json` 至 `teleport7.json` 和环境变量 `BOT_TELEPORT_CONFIG` 已不再参与传送点加载；传送点统一维护在 `config/game/teleport.json`。
 
 ## 游戏内命令
 
-公屏加 `%` 前缀，私聊无需前缀。回复均为私聊（`replyAlwaysWhisper: true`）。
+公屏加 `%` 前缀，私聊无需前缀。当前配置下游戏内回复均通过私聊发送（`replyAlwaysWhisper: true`）；终端命令的结果直接显示在终端。
 
 ### 传送
 
@@ -74,8 +78,9 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 | `挂机 [备注]` | 请求传送（锁定后自动拒绝其他玩家） |
 | `%1` ~ `%N` | 按编号触发已配置的传送点（各 bot 只响应自己归属的点） |
 | `%0` | 列出传送点（仅 `phome_towns.json` 配置的主 bot 响应） |
+| `%phome <别名>` | 按别名触发传送点；私聊直接发送 `phome <别名>` |
 
-编号与别名在对应的 `teleport*.json` 中配置。多个 bot 属于同一小镇时，归属 bot 被锁定后可由空闲的同镇 bot 代为执行共享传送点。
+编号、别名、执行指令和 `owner` 均在共享的 `config/game/teleport.json` 中配置。`加phome点` 会自动写入当前 bot 的 `owner`，`移除phome点` 会从同一文件删除；配置变更通常在 3 秒内被运行中的 bot 读到。多个 bot 属于同一小镇时，归属 bot 被锁定或离线后，可由空闲的同镇 bot 代执行 `/phome`、`/ts` 点；`/home`、`/tsl` 点只由归属 bot 响应。
 
 ### 锁定
 
@@ -200,7 +205,7 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 | `指令 <命令>` | 以 bot 执行命令（管理员） |
 | `指令循环 间隔Xs <命令>` | 定时循环执行 |
 | `指令循环 停止/状态` | 管理循环 |
-| `加phome点 <名称> <指令>` | 添加传送点 |
+| `加phome点 <别名> [id] <指令> [位置]` | 添加传送点；`/home`、`/ts`、`/tsl` 不需要 `id`，位置为从 1 开始的插入编号 |
 | `移除phome点 <编号>` | 删除传送点 |
 | `加phome白名单 <名>` | 添加 phome 白名单 |
 | `移除phome白名单 <名>` | 移除 phome 白名单 |
@@ -223,7 +228,7 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 | `.env` / `.env.botN` | 服务器、账号、认证方式、管理员、消息队列、API 和 bot 身份环境变量 |
 | `config/game/command.json` | 命令前缀、公屏开关与回复方式 |
 | `config/game/bot.json` | 待命、AFK、交互距离、循环命令限制与 bot 默认行为 |
-| `config/game/teleport*.json` | 每个 bot 的传送点与传送指令；由 `BOT_TELEPORT_CONFIG` 选择 |
+| `config/game/teleport.json` | 所有 bot 共用的传送点、执行指令和 `owner` 归属 |
 | `config/game/phome_towns.json` | 主 bot 与各 bot 所属小镇，用于共享传送点代执行 |
 | `config/game/messages.json` | 游戏内回复文案和帮助文本 |
 | `config/game/item-names.json` | 物品 ID 的中文显示名 |
@@ -232,7 +237,7 @@ $env:DOTENV_CONFIG_PATH = '.env.bot3'; npm run dev
 | `config/game/viewer.json` | 网页 Viewer 的启用状态、端口、视角与渲染视距 |
 | `config/game/README.md` | 游戏配置字段的补充说明 |
 
-`.env.example` 列出可用环境变量。多 bot 时应为每个 `.env.botN` 设置 `BOT_INDEX`、`BOT_TELEPORT_CONFIG`、`BOT_NAME`，并按需设置基地范围 `BOT_BASE_MIN_X`、`BOT_BASE_MAX_X`、`BOT_BASE_MIN_Z`、`BOT_BASE_MAX_Z`。
+`.env.example` 列出可用环境变量。多 bot 时应为每个 `.env.botN` 设置 `MC_USERNAME`、`MC_PROFILES_FOLDER`、`BOT_INDEX` 和 `BOT_NAME`，并按需设置基地范围 `BOT_BASE_MIN_X`、`BOT_BASE_MAX_X`、`BOT_BASE_MIN_Z`、`BOT_BASE_MAX_Z`。`BOT_TELEPORT_CONFIG` 是旧配置项，当前会被忽略。
 
 ### 网页 Viewer
 
