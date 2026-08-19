@@ -1,29 +1,29 @@
 {
-  "mainBot": "XieveLte",
+  "mainBot": "name",
   "bots": {
-    "XieveLte": {
+    "name": {
       "index": 1,
-      "town": "寂语修会"
+      "town": "townname"
     },
-    "XieveYte": {
+    "name": {
       "index": 2,
-      "town": "昼寝结社"
+      "town": "townname"
     },
-    "ama_lu_1": {
+    "name": {
       "index": 3,
-      "town": "拉特兰"
+      "town": "townname"
     },
-    "ama_lu_5": {
+    "name": {
       "index": 4,
-      "town": "寂语修会"
+      "town": "townname"
     },
-    "YunCai123": {
+    "name": {
       "index": 5,
-      "town": "拉特兰"
+      "town": "townname"
     },
-    "ama_lu_7": {
+    "name": {
       "index": 6,
-      "town": "卡兹戴尔"
+      "town": "townname"
     }
   }
 }
