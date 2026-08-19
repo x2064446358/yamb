@@ -21,7 +21,8 @@ export function parsePrefixedArgs (text: string, prefix: string): string[] {
 
 export const KNOWN_COMMANDS = new Set([
   'lock', 'unlock', 'add', 'remove', 'status', 'say', 'forward',
-  'mount', '坐', 'unmount', '下车', '蹲下', 'cart', 'attack', 'container',
+  'phome',
+  'mount', '坐', 'unmount', '下车', '蹲下', 'cart', 'attack', '哈气', '对', 'sp', 'container',
   'inv', 'store', 'take', 'drop',
   '挂机', '锁定', '解锁', '改锁定', '解锁all', '状态', '状态2', '状态3', '上车',
   '加白名单', '移除白名单', '白名单列表',
@@ -55,24 +56,4 @@ export function parseWhisperCommand (text: string): string[] | null {
   return parts
 }
 
-export function parsePublicCommand (text: string, prefix: string): string[] | null {
-  if (!matchesPrefix(text, prefix)) return null
-  const args = parsePrefixedArgs(text, prefix)
-  if (args.length === 0) return null
-  return args
-}
-
 export type CommandSource = 'chat' | 'whisper' | 'console'
-
-export function parseCommandInput (
-  text: string,
-  prefix: string,
-  source: CommandSource,
-  allowPublicCommands: boolean
-): string[] | null {
-  if (source === 'whisper') {
-    return parseWhisperCommand(text)
-  }
-  if (!allowPublicCommands) return null
-  return parsePublicCommand(text, prefix)
-}

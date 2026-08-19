@@ -1,0 +1,11 @@
+{
+  "id": "樱花奶茶",
+  "fermentation": {
+    "duration": "8m",
+    "ingredients": {
+      "樱桃": 10,
+      "糖": 2,
+      "牛奶": 2
+    }
+  }
+}

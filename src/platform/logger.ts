@@ -40,7 +40,11 @@ export function initLogger (p: string): void {
 }
 
 function toMsg (...args: unknown[]): string {
-  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
+  return args.map(a => {
+    if (typeof a === 'string') return a
+    if (a instanceof Error) return a.stack || a.message
+    try { return JSON.stringify(a) } catch { return String(a) }
+  }).join(' ')
 }
 
 let _termOut: ((msg: string) => void) | null = null
@@ -57,7 +61,7 @@ function termWrite (msg: string): void {
 
 /** 聊天消息：仅终端 */
 export function chat (msg: string): void {
-  termWrite(`\x1b[2;37m${ts()}\x1b[0m \x1b[36m${msg}\x1b[0m`)
+  termWrite(`\x1b[2;37m${ts()}\x1b[0m ${msg}`)
 }
 
 /** 重要事件：终端 + 文件 */

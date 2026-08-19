@@ -1,0 +1,16 @@
+{
+  "id": "龙涎酒",
+  "fermentation": {
+    "duration": "30m",
+    "ingredients": {
+      "龙蛋": 2,
+      "紫颂果": 5,
+      "末影珍珠": 2,
+      "小麦": 6
+    }
+  },
+  "aging": {
+    "days": 200,
+    "wood": "any"
+  }
+}

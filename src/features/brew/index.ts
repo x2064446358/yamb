@@ -11,7 +11,7 @@ import type InventoryActions from '../../actions/inventory'
 import { findExactMatchingItems, normalizeItemKey } from '../../actions/inventory'
 import { sleep } from '../../platform/sleep'
 import { loadBrewRecipes } from '../../config/loader'
-import { approachEntity, ensurePathfinder, entityLookPoint, lookAtSmart } from '../../actions/shared/entity-utils'
+import { approachEntity, ensurePathfinder, entityLookPoint, escapeStuck, gotoWithEscape, lookAtSmart } from '../../actions/shared/entity-utils'
 import { getAgingWoodType } from './block-node-utils'
 import { debug, warn } from '../../platform/logger'
 
@@ -20,12 +20,25 @@ const AGING_MS_PER_DAY = 20 * 60 * 1000
 const AGING_REMIND_10_MS = 10 * 60 * 1000
 const AGING_REMIND_5_MS = 5 * 60 * 1000
 const AGING_TICK_MS = 15_000
-/** 自动挤奶搜索半径 */
-const MILK_SEARCH_DISTANCE = 12
 /** 陈化酒桶允许的接近距离（酒桶可能离酿酒区较远） */
 const AGING_BARREL_APPROACH = 30
 /** 酿酒各节点/容器允许的接近距离（原料箱/炼药锅/工具箱等可能较分散） */
 const BREW_APPROACH = 30
+
+function formatRemainingTime (totalSeconds: number): string {
+  let remaining = Math.max(0, Math.floor(totalSeconds))
+  const days = Math.floor(remaining / 86400)
+  remaining %= 86400
+  const hours = Math.floor(remaining / 3600)
+  remaining %= 3600
+  const minutes = Math.floor(remaining / 60)
+  const seconds = remaining % 60
+
+  if (days > 0) return `${days}天 ${hours}小时 ${minutes}分`
+  if (hours > 0) return `${hours}小时 ${minutes}分`
+  if (minutes > 0) return `${minutes}分 ${seconds}秒`
+  return `${seconds}秒`
+}
 
 interface AgingTask {
   id: string
@@ -38,6 +51,13 @@ interface AgingTask {
   pendingAwayNotified: boolean
   phase: 'aging' | 'pending-collect'
   collecting: boolean
+}
+
+interface QueuedBrew {
+  id: number
+  recipeId: string
+  owner: string
+  report: (message: string) => Promise<void>
 }
 
 function formatRemaining (finishAt: number, now = Date.now()): string {
@@ -59,7 +79,6 @@ export default class BrewModule {
   private readonly inventoryActions: InventoryActions
   private readonly useItemModule: UseItemModule
   private readonly interactionDistance: number
-  private readonly approachDistance: number
   private readonly db: DatabaseSync
   /** 本 bot 的 BOT_INDEX：酿酒任务按它归属，共享库多 bot 时只有归属 bot 恢复/提醒/收取 */
   private readonly botIndex: number
@@ -72,6 +91,7 @@ export default class BrewModule {
   private agingDeferred = false
   private cancelRequested = false
   private taskRunning = false
+  private holdPositionAfterFailure = false
   private report: ((message: string) => Promise<void>) | null = null
   private errors = 0
   private currentOwner: string | null = null
@@ -82,6 +102,17 @@ export default class BrewModule {
   private distillationStartedAt = 0
   private readonly agingTasks = new Map<string, AgingTask>()
   private agingTimer: ReturnType<typeof setInterval> | null = null
+  /** Current fermentation/recovery task; shutdown must await its cleanup. */
+  private activeTaskPromise: Promise<void> | null = null
+  /** Aging ticks and queue retries may also be inside async database work. */
+  private readonly pendingOperations = new Set<Promise<void>>()
+  private stopping = false
+  private readonly brewQueue: QueuedBrew[] = []
+  private startingQueuedBrew = false
+  private queueRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private queueStartRetryCount = 0
+  /** 已从内存队列取出、但尚未完成投料并写入 brew_tasks 的任务。 */
+  private activeQueueId: number | null = null
 
   constructor (
     mcBot: MinecraftBot,
@@ -90,7 +121,6 @@ export default class BrewModule {
     inventoryActions: InventoryActions,
     useItemModule: UseItemModule,
     interactionDistance: number,
-    approachDistance: number,
     db: DatabaseSync,
     botIndex: number
   ) {
@@ -100,7 +130,6 @@ export default class BrewModule {
     this.inventoryActions = inventoryActions
     this.useItemModule = useItemModule
     this.interactionDistance = interactionDistance
-    this.approachDistance = approachDistance
     this.db = db
     this.botIndex = botIndex
   }
@@ -137,11 +166,19 @@ export default class BrewModule {
     return this.taskRunning
   }
 
+  /** Keep the bot at the brewery after an unexpected failure without blocking commands. */
+  shouldPreventStandbyHome (): boolean {
+    return this.taskRunning || this.holdPositionAfterFailure || this.agingTasks.size > 0
+  }
+
   async start (
     recipeId: string,
     report: (message: string) => Promise<void>,
     owner: string
-  ): Promise<ServiceResult> {
+  ): Promise<ServiceResult & { queued?: boolean }> {
+    if (this.stopping) {
+      return { success: false, message: 'bot 正在停止酿酒任务' }
+    }
     if (!this.config.enabled) {
       return { success: false, message: '酿酒模块未启用' }
     }
@@ -151,19 +188,33 @@ export default class BrewModule {
     if (!Number.isInteger(this.config.fermenterCount) || this.config.fermenterCount <= 0) {
       return { success: false, message: 'fermenterCount 必须是正整数' }
     }
-    if (this.taskRunning) {
-      return { success: false, message: '上一酿酒任务仍在停止或清理中' }
-    }
-    if (this.isLockedProvider()) {
-      return { success: false, message: 'bot 当前处于锁定状态' }
-    }
-
     const recipe = this.config.recipes.find(item => item.id === recipeId)
     if (!recipe) {
       return { success: false, message: `配方不存在: ${recipeId}` }
     }
 
+    if (this.taskRunning) {
+      let id: number
+      try {
+        id = this.saveQueuedBrew(recipe.id, owner)
+      } catch (err) {
+        return { success: false, message: `队列保存失败: ${(err as Error).message}` }
+      }
+      this.brewQueue.push({ id, recipeId: recipe.id, owner, report })
+      this.releaseAgingLockForQueue()
+      return {
+        success: true,
+        queued: true,
+        message: `已加入酿酒队列: ${recipe.id}（前方 ${this.brewQueue.length - 1} 项）`
+      }
+    }
+    this.releaseAgingLockForQueue()
+    if (this.isLockedProvider()) {
+      return { success: false, message: 'bot 当前处于锁定状态' }
+    }
+
     this.cancelRequested = false
+    this.holdPositionAfterFailure = false
     this.taskRunning = true
     this.errors = 0
     this.report = report
@@ -171,8 +222,55 @@ export default class BrewModule {
     this.phase = 'checking'
     this.recipeId = recipe.id
     this.finishAt = 0
-    void this.runFermentation(recipe)
+    this.trackTask(this.runFermentation(recipe))
     return { success: true, message: `已开始发酵 ${recipe.id}` }
+  }
+
+  private releaseAgingLockForQueue (): void {
+    // 重连恢复时 isLockedByAging 不在内存中，但锁的备注仍为“陈化”，也要释放以便继续队列。
+    if (!this.isLockedByAging && !this.agingLockStillMine()) return
+    if (this.unlockAgingFn) this.unlockAgingFn()
+    this.isLockedByAging = false
+  }
+
+  private async startNextQueuedBrew (): Promise<void> {
+    if (this.stopping) return
+    if (this.taskRunning || this.startingQueuedBrew || this.brewQueue.length === 0) return
+    this.startingQueuedBrew = true
+    const next = this.brewQueue[0]
+    try {
+      const result = await this.start(next.recipeId, next.report, next.owner)
+      if (!result.success) {
+        if (this.queueStartRetryCount === 0) {
+          await next.report(`队列中的酿酒 ${next.recipeId} 暂未启动: ${result.message || '未知错误'}，将自动重试`)
+        }
+        this.queueStartRetryCount++
+        this.scheduleNextQueuedBrew(10_000)
+        return
+      }
+      this.brewQueue.shift()
+      this.queueStartRetryCount = 0
+      // 保留数据库记录到投料完成，掉线后可重新尝试尚未真正开始的这一项。
+      this.activeQueueId = next.id
+      await next.report(`队列中的酿酒 ${next.recipeId} 已开始`)
+    } catch (err) {
+      if (this.queueStartRetryCount === 0) {
+        await next.report(`队列中的酿酒 ${next.recipeId} 暂未启动: ${(err as Error).message}，将自动重试`)
+      }
+      this.queueStartRetryCount++
+      this.scheduleNextQueuedBrew(10_000)
+    } finally {
+      this.startingQueuedBrew = false
+    }
+  }
+
+  /** 在当前流程清理完毕后启动下一项；失败时保留队列并重试，不会丢任务。 */
+  private scheduleNextQueuedBrew (delayMs = 0): void {
+    if (this.brewQueue.length === 0 || this.queueRetryTimer) return
+    this.queueRetryTimer = setTimeout(() => {
+      this.queueRetryTimer = null
+      this.trackOperation(this.startNextQueuedBrew())
+    }, delayMs)
   }
 
   status (): {
@@ -182,11 +280,13 @@ export default class BrewModule {
     finishAt?: number
     detail?: string
     aging?: string[]
+    queue?: string[]
   } {
     const aging = this.formatAgingStatusLines()
+    const queue = this.formatQueueStatusLines()
     if (!this.taskRunning) {
-      return aging.length > 0
-        ? { running: false, aging }
+      return aging.length > 0 || queue.length > 0
+        ? { running: false, aging, queue }
         : { running: false }
     }
     return {
@@ -195,24 +295,63 @@ export default class BrewModule {
       phase: this.phase ?? undefined,
       finishAt: this.finishAt || undefined,
       detail: this.formatBrewingStatus(),
-      aging
+      aging,
+      queue
     }
   }
 
+  formatQueueStatusLines (): string[] {
+    return this.brewQueue.map((task, index) => `队列｜${index + 1}｜${task.recipeId}｜${task.owner}`)
+  }
+
+  clearQueue (): number {
+    const count = this.brewQueue.length
+    this.brewQueue.length = 0
+    if (this.queueRetryTimer) {
+      clearTimeout(this.queueRetryTimer)
+      this.queueRetryTimer = null
+    }
+    try {
+      this.db.prepare('DELETE FROM brew_queue WHERE bot_index = ?').run(this.botIndex)
+    } catch { /* ignore */ }
+    return count
+  }
+
+  /** 按状态列表中的 1 起始序号删除尚未开始的队列项。 */
+  removeQueueItem (position: number): ServiceResult & { recipeId?: string } {
+    if (!Number.isInteger(position) || position < 1) {
+      return { success: false, message: '队列序号必须是大于 0 的整数' }
+    }
+    const index = position - 1
+    const task = this.brewQueue[index]
+    if (!task) return { success: false, message: `队列中没有第 ${position} 项` }
+
+    try {
+      if (!this.deleteQueuedBrew(task.id)) {
+        return { success: false, message: '队列记录不存在或已被删除，请重新查看队列' }
+      }
+    } catch (err) {
+      return { success: false, message: `删除队列失败: ${(err as Error).message}` }
+    }
+    this.brewQueue.splice(index, 1)
+    return { success: true, recipeId: task.recipeId, message: `已删除队列第 ${position} 项: ${task.recipeId}` }
+  }
+
   formatAgingStatusLines (now = Date.now()): string[] {
-    return [...this.agingTasks.values()]
-      .sort((a, b) => a.finishAt - b.finishAt)
-      .map(task => {
+    return this.orderedAgingTasks()
+      .map((task, index) => {
         const when = new Date(task.finishAt).toLocaleTimeString()
         if (task.phase === 'pending-collect') {
-          return `陈化 ${task.recipeId} @ ${task.barrel.alias} 待收取`
+          return `陈化｜${index + 1}｜${task.recipeId}｜${task.barrel.alias}｜待收取`
         }
         const remaining = Math.max(0, Math.ceil((task.finishAt - now) / 1000))
-        const minutes = Math.floor(remaining / 60)
-        const seconds = remaining % 60
-        const left = minutes > 0 ? `${minutes}分 ${seconds}秒` : `${seconds}秒`
-        return `陈化 ${task.recipeId} @ ${task.barrel.alias} 剩余 ${left} (~${when})`
+        const left = formatRemainingTime(remaining)
+        return `陈化｜${index + 1}｜${task.recipeId}｜${task.barrel.alias}｜剩余 ${left}｜${when} 完成`
       })
+  }
+
+  private orderedAgingTasks (): AgingTask[] {
+    return [...this.agingTasks.values()].sort((a, b) => a.finishAt - b.finishAt)
   }
 
   private formatBrewingStatus (): string {
@@ -231,7 +370,7 @@ export default class BrewModule {
                 total,
                 Math.max(0, Math.floor((Date.now() - this.distillationStartedAt) / 45000))
               )
-        return `蒸馏 ${completed}/${total} 次`
+        return `${completed}/${total} 次`
       }
     }
 
@@ -240,10 +379,10 @@ export default class BrewModule {
       this.phase === 'waiting' ||
       this.phase === 'bottling'
     ) {
-      return `发酵中 剩余 ${formatRemaining(this.finishAt)}`
+      return `剩余 ${formatRemaining(this.finishAt)}`
     }
 
-    return '酿酒中'
+    return '处理中'
   }
 
   reloadRecipes (): ServiceResult & { count?: number } {
@@ -264,13 +403,14 @@ export default class BrewModule {
   }
 
   cancel (): boolean {
-    if (!this.taskRunning) return false
+    if (!this.taskRunning && !this.activeTaskPromise) return false
     this.cancelRequested = true
     return true
   }
 
   async stop (): Promise<boolean> {
-    if (!this.taskRunning) return false
+    if (!this.taskRunning && !this.activeTaskPromise && this.pendingOperations.size === 0) return false
+    this.stopping = true
     this.cancelRequested = true
     const bot = this.mcBot.bot
     if (bot) {
@@ -279,17 +419,129 @@ export default class BrewModule {
       try { bot.deactivateItem() } catch { /* ignore */ }
       bot.clearControlStates()
     }
+    const task = this.activeTaskPromise
+    if (task) {
+      try {
+        await task
+      } catch (err) {
+        // The task performs its own cleanup; keep shutdown moving after logging unexpected failures.
+        warn('[Brew] 停止任务清理失败:', (err as Error).message)
+      }
+      if (this.activeTaskPromise === task) this.activeTaskPromise = null
+    }
+    while (this.pendingOperations.size > 0) {
+      await Promise.allSettled([...this.pendingOperations])
+    }
+    this.stopping = false
     return true
   }
 
+  /** Stop one or all aging jobs without touching the items left in barrels. */
+  async stopAging (position?: number): Promise<{ stopped: number; invalidPosition: boolean }> {
+    const allTasks = this.orderedAgingTasks()
+    if (allTasks.length === 0) return { stopped: 0, invalidPosition: false }
+
+    let tasks = allTasks
+    if (position !== undefined) {
+      if (!Number.isInteger(position) || position < 1 || position > allTasks.length) {
+        return { stopped: 0, invalidPosition: true }
+      }
+      tasks = [allTasks[position - 1]]
+    }
+
+    for (const task of tasks) this.agingTasks.delete(task.id)
+    for (const task of tasks) this.deleteAgingTask(task.id)
+    if (this.agingTasks.size === 0 && this.agingTimer) {
+      clearInterval(this.agingTimer)
+      this.agingTimer = null
+    }
+    if (this.agingTasks.size === 0) {
+      this.agingDeferred = false
+      this.releaseAgingLockForQueue()
+    }
+
+    // Once no brew, queue, or aging task remains, return the staged inventory.
+    await this.restoreStagedInventoryWhenIdle()
+    return { stopped: tasks.length, invalidPosition: false }
+  }
+
+  private trackOperation (operation: Promise<void>): void {
+    this.pendingOperations.add(operation)
+    void operation
+      .finally(() => {
+        this.pendingOperations.delete(operation)
+      })
+      .catch(() => { /* caller or task observer records the failure */ })
+  }
+
+  private trackTask (task: Promise<void>): void {
+    this.activeTaskPromise = task
+    this.trackOperation(task)
+    void task
+      .catch(err => {
+        warn('[Brew] 后台任务异常:', (err as Error).message)
+      })
+      .finally(() => {
+        if (this.activeTaskPromise === task) this.activeTaskPromise = null
+      })
+      .catch(() => { /* observer only; stop() awaits the original task */ })
+  }
+
   dispose (): void {
+    this.stopping = true
     if (this.agingTimer) {
       clearInterval(this.agingTimer)
       this.agingTimer = null
     }
+    if (this.queueRetryTimer) {
+      clearTimeout(this.queueRetryTimer)
+      this.queueRetryTimer = null
+    }
   }
 
   // ===== 酿酒任务持久化（掉线重连恢复） =====
+
+  private saveQueuedBrew (recipeId: string, owner: string): number {
+    const result = this.db.prepare(`
+      INSERT INTO brew_queue (recipe_id, owner, bot_index, queued_at)
+      VALUES (?, ?, ?, ?)
+    `).run(recipeId, owner, this.botIndex, Date.now())
+    return Number(result.lastInsertRowid)
+  }
+
+  private deleteQueuedBrew (id: number): boolean {
+    const result = this.db.prepare('DELETE FROM brew_queue WHERE id = ? AND bot_index = ?').run(id, this.botIndex)
+    return (result.changes ?? 0) > 0
+  }
+
+  private queueReport (owner: string): (message: string) => Promise<void> {
+    return async message => {
+      this.mcBot.whisper(owner, message)
+    }
+  }
+
+  /** 发酵任务已写入数据库，队列记录可以安全移除。 */
+  private completeActiveQueuedBrew (): void {
+    if (this.activeQueueId == null) return
+    try {
+      this.deleteQueuedBrew(this.activeQueueId)
+      this.activeQueueId = null
+    } catch (err) {
+      warn('[Brew] 删除已启动队列记录失败:', (err as Error).message)
+    }
+  }
+
+  /** 任务在完成投料前结束时清理当前队列项；异常掉线不会走到这里，记录会保留供重连恢复。 */
+  private discardActiveQueuedBrew (): void {
+    if (this.activeQueueId == null) return
+    try {
+      this.deleteQueuedBrew(this.activeQueueId)
+    } catch (err) {
+      warn('[Brew] 清理失败队列记录失败:', (err as Error).message)
+    } finally {
+      this.activeQueueId = null
+    }
+  }
 
   private saveAgingTask (task: AgingTask): void {
     try {
@@ -329,6 +581,7 @@ export default class BrewModule {
         INSERT OR REPLACE INTO brew_tasks (id, kind, recipe_id, owner, finish_at, bot_index)
         VALUES ('ferment', 'ferment', ?, ?, ?, ?)
       `).run(recipeId, this.currentOwner || 'unknown', finishAt, this.botIndex)
+      this.completeActiveQueuedBrew()
     } catch { /* 持久化失败不阻断流程 */ }
   }
 
@@ -361,6 +614,33 @@ export default class BrewModule {
       return Number(row.bot_index) === this.botIndex
     }
 
+    // onSpawn 会在同一进程重连后再次触发；先以数据库为准重建，避免重复显示/执行队列项。
+    this.brewQueue.length = 0
+    try {
+      const queuedRows = this.db.prepare(`
+        SELECT id, recipe_id, owner FROM brew_queue
+        WHERE bot_index = ?
+        ORDER BY id ASC
+      `).all(this.botIndex) as Array<{ id: number, recipe_id: string, owner: string }>
+      for (const row of queuedRows) {
+        const recipeId = String(row.recipe_id)
+        const owner = String(row.owner)
+        if (!this.config.recipes.some(recipe => recipe.id === recipeId)) {
+          this.deleteQueuedBrew(Number(row.id))
+          warn(`[Brew] 已移除不存在配方的队列项: ${recipeId}`)
+          continue
+        }
+        this.brewQueue.push({
+          id: Number(row.id),
+          recipeId,
+          owner,
+          report: this.queueReport(owner)
+        })
+      }
+    } catch (err) {
+      warn('[Brew] 恢复酿酒队列失败:', (err as Error).message)
+    }
+
     const fermentRow = rows.find(r => r.kind === 'ferment' && adoptOrSkip(r))
     if (fermentRow) {
       const recipeId = String(fermentRow.recipe_id ?? '')
@@ -369,7 +649,7 @@ export default class BrewModule {
       const recipe = this.config.recipes.find(item => item.id === recipeId)
       if (recipe && Number.isFinite(finishAt)) {
         this.taskRunning = true
-        void this.resumeFermentation(recipe, finishAt, owner)
+        this.trackTask(this.resumeFermentation(recipe, finishAt, owner))
       } else {
         this.clearFermentTask()
       }
@@ -406,10 +686,16 @@ export default class BrewModule {
       this.ensureAgingTimer()
       debug(`[Brew] 恢复 ${this.agingTasks.size} 个陈化任务`)
     }
+    if (this.brewQueue.length > 0) {
+      this.releaseAgingLockForQueue()
+      debug(`[Brew] 恢复 ${this.brewQueue.length} 个酿酒队列任务`)
+      if (!this.taskRunning) this.scheduleNextQueuedBrew()
+    }
   }
 
   /** 掉线恢复：等发酵完成→装瓶→蒸馏→陈化/入库 */
   private async resumeFermentation (recipe: BrewRecipe, finishAt: number, owner: string): Promise<void> {
+    let completed = false
     this.currentOwner = owner
     this.recipeId = recipe.id
     this.agingDeferred = false
@@ -451,13 +737,18 @@ export default class BrewModule {
         await this.storeAllPotions()
         await this.whisperOwner(`酿酒 ${recipe.id} 已完成（掉线恢复）`)
       }
+      completed = true
     } catch (err) {
       const cancelled = err instanceof BrewCancelledError
+      if (!cancelled) this.holdPositionAfterFailure = true
       const message = cancelled
         ? '酿酒任务已取消'
         : `酿酒任务停止: ${(err as Error).message}`
       warn(`[Brew] ${message}`)
       await this.whisperOwner(message)
+      if (!cancelled) {
+        await this.whisperOwner('酿酒异常后 bot 将留在酒庄，不会自动回基地；可修正问题后再次开始酿酒')
+      }
     } finally {
       this.currentOwner = null
       this.phase = null
@@ -466,7 +757,10 @@ export default class BrewModule {
       this.taskRunning = false
       this.clearFermentTask()
       // 进入陈化的配方：暂存物品等陈化完成、产物入库后再取回
-      if (!this.agingDeferred) await this.restoreStagedInventory()
+      // 只要仍有任意陈化任务，暂存物品都必须继续留在暂存箱。
+      // 队列中的下一锅可能不陈化，不能因此提前取回上一锅的暂存物品。
+      if (!this.agingDeferred && this.agingTasks.size === 0) await this.restoreStagedInventory()
+      if (completed) this.scheduleNextQueuedBrew()
     }
   }
 
@@ -553,8 +847,14 @@ export default class BrewModule {
     } catch { /* 取回失败不影响主流程 */ }
   }
 
+  private async restoreStagedInventoryWhenIdle (): Promise<void> {
+    if (this.taskRunning || this.brewQueue.length > 0 || this.agingTasks.size > 0) return
+    await this.restoreStagedInventory()
+  }
+
   private async runFermentation (recipe: BrewRecipe): Promise<void> {
     let hasCollectedProducts = false
+    let completed = false
     this.agingDeferred = false
     try {
       // 开酿前清空背包到暂存箱，酿完取回
@@ -609,13 +909,18 @@ export default class BrewModule {
             : `酿酒 ${recipe.id} 已完成`
         )
       }
+      completed = true
     } catch (err) {
       const cancelled = err instanceof BrewCancelledError
+      if (!cancelled) this.holdPositionAfterFailure = true
       const message = cancelled
         ? '酿酒任务已取消'
         : `酿酒任务停止: ${(err as Error).message}`
       warn(`[Brew] ${message}`)
       await this.reportSafe(message)
+      if (!cancelled) {
+        await this.reportSafe('酿酒异常后 bot 将留在酒庄，不会自动回基地；可修正问题后再次开始酿酒')
+      }
       if (!cancelled && hasCollectedProducts) {
         await this.reportSafe('检测到异常中止，尝试将背包中的半成品存入产物箱')
         try {
@@ -635,8 +940,10 @@ export default class BrewModule {
       this.finishAt = 0
       this.taskRunning = false
       this.clearFermentTask()
+      this.discardActiveQueuedBrew()
       // 进入陈化的配方：暂存物品等陈化完成、产物入库后再取回
-      if (!this.agingDeferred) await this.restoreStagedInventory()
+      if (!this.agingDeferred && this.agingTasks.size === 0) await this.restoreStagedInventory()
+      if (completed) this.scheduleNextQueuedBrew()
     }
   }
 
@@ -1045,6 +1352,16 @@ export default class BrewModule {
     let deposit: ServiceResult & { count?: number } | null = null
     for (const candidate of barrels) {
       this.assertNotCancelled()
+      // 登记酒桶可远离酿酒区；先全程寻路，避免 approachBlock 的本地接近阈值
+      // 将远处酒桶误判为不可用。
+      const route = await gotoWithEscape(
+        this.mcBot.bot!,
+        new Vec3(candidate.x + 0.5, candidate.y + 0.5, candidate.z + 0.5),
+        this.configDistance('interaction')
+      )
+      if (!route.success) {
+        throw new Error(`前往酒桶 ${candidate.alias} 失败: ${route.message || '无法到达'}`)
+      }
       const attempt = await this.inventoryActions.depositPotionsToAgingBarrel(
         candidate.x,
         candidate.y,
@@ -1073,7 +1390,7 @@ export default class BrewModule {
     }
 
     // 陈化期间锁定 bot（与主酿酒一致），防止被待命系统/其他玩家移动，保证到点能自动收取
-    if (!this.isLockedProvider() && this.lockAgingFn && this.currentOwner) {
+    if (this.brewQueue.length === 0 && !this.isLockedProvider() && this.lockAgingFn && this.currentOwner) {
       this.lockAgingFn(this.currentOwner)
       this.isLockedByAging = true
     }
@@ -1135,11 +1452,12 @@ export default class BrewModule {
   private ensureAgingTimer (): void {
     if (this.agingTimer) return
     this.agingTimer = setInterval(() => {
-      void this.tickAgingTasks()
+      this.trackOperation(this.tickAgingTasks())
     }, AGING_TICK_MS)
   }
 
   private async tickAgingTasks (): Promise<void> {
+    if (this.stopping) return
     if (this.agingTasks.size === 0) {
       if (this.agingTimer) {
         clearInterval(this.agingTimer)
@@ -1150,11 +1468,25 @@ export default class BrewModule {
 
     const now = Date.now()
     for (const task of [...this.agingTasks.values()]) {
+      if (this.stopping) return
+      if (this.agingTasks.get(task.id) !== task) continue
       if (task.collecting) continue
 
       if (task.phase === 'aging') {
         const remaining = task.finishAt - now
-        if (!task.reminded10 && remaining <= AGING_REMIND_10_MS) {
+        // Reminders are mutually exclusive when a late/recovered tick first sees
+        // a task inside the final five minutes.
+        if (remaining > 0 && remaining <= AGING_REMIND_5_MS && !task.reminded5) {
+          task.reminded10 = true
+          task.reminded5 = true
+          if (!this.isNearAgingBarrel(task.barrel)) {
+            await this.notifyAgingOwner(
+              task,
+              `\u9648\u5316 ${task.recipeId} @ ${task.barrel.alias} \u7ea6 5 \u5206\u949f\u540e\u5b8c\u6210\uff0c\u8bf7\u786e\u4fdd bot \u56de\u5230\u9152\u5e84`
+            )
+          }
+          this.saveAgingTask(task)
+        } else if (remaining > 0 && remaining <= AGING_REMIND_10_MS && !task.reminded10) {
           task.reminded10 = true
           const near = this.isNearAgingBarrel(task.barrel)
           await this.notifyAgingOwner(
@@ -1164,18 +1496,11 @@ export default class BrewModule {
               : `陈化 ${task.recipeId} @ ${task.barrel.alias} 约 10 分钟后完成（当前不在酒庄附近）`
           )
           if (near) task.reminded5 = true
-        }
-        if (!task.reminded5 && remaining <= AGING_REMIND_5_MS) {
-          task.reminded5 = true
-          if (!this.isNearAgingBarrel(task.barrel)) {
-            await this.notifyAgingOwner(
-              task,
-              `陈化 ${task.recipeId} @ ${task.barrel.alias} 约 5 分钟后完成，请确保 bot 回到酒庄`
-            )
-          }
+          this.saveAgingTask(task)
         }
         if (remaining > 0) continue
         task.phase = 'pending-collect'
+        this.saveAgingTask(task)
       }
 
       if (task.phase === 'pending-collect') {
@@ -1210,20 +1535,46 @@ export default class BrewModule {
   }
 
   private async tryCollectAging (task: AgingTask): Promise<void> {
+    if (this.agingTasks.get(task.id) !== task) return
     if (!this.canCollectAging()) return
-    if (!this.isNearAgingBarrel(task.barrel)) {
-      if (!task.pendingAwayNotified) {
-        task.pendingAwayNotified = true
-        await this.notifyAgingOwner(
-          task,
-          `陈化 ${task.recipeId} @ ${task.barrel.alias} 已完成，但 bot 不在酒庄附近，稍后重试收取`
-        )
-      }
-      return
-    }
-
     task.collecting = true
     try {
+      const bot = this.mcBot.bot
+      if (!bot) return
+      if (!this.sameDimension(task.barrel.dimension)) {
+        if (!task.pendingAwayNotified) {
+          task.pendingAwayNotified = true
+          this.saveAgingTask(task)
+          await this.notifyAgingOwner(
+            task,
+            `陈化 ${task.recipeId} @ ${task.barrel.alias} 已完成，但 bot 不在酒桶所在维度，等待返回后自动收取`
+          )
+        }
+        return
+      }
+
+      if (!this.isNearAgingBarrel(task.barrel)) {
+        if (!task.pendingAwayNotified) {
+          task.pendingAwayNotified = true
+          this.saveAgingTask(task)
+          await this.notifyAgingOwner(
+            task,
+            `陈化 ${task.recipeId} @ ${task.barrel.alias} 已完成，bot 正在前往登记酒桶自动收取`
+          )
+        }
+        const route = await gotoWithEscape(
+          bot,
+          new Vec3(task.barrel.x + 0.5, task.barrel.y + 0.5, task.barrel.z + 0.5),
+          this.configDistance('interaction')
+        )
+        if (!route.success) {
+          warn(`[Brew] 前往陈化酒桶 ${task.barrel.alias} 失败: ${route.message || '未知错误'}`)
+          return
+        }
+      }
+
+      if (this.agingTasks.get(task.id) !== task) return
+
       const withdraw = await this.inventoryActions.withdrawPotionsFromAgingBarrel(
         task.barrel.x,
         task.barrel.y,
@@ -1244,7 +1595,7 @@ export default class BrewModule {
         this.agingTasks.delete(task.id)
         this.deleteAgingTask(task.id)
         this.unlockAfterAgingIfMine()
-        await this.restoreStagedInventory()
+        await this.restoreStagedInventoryWhenIdle()
         await this.notifyAgingOwner(
           task,
           `陈化 ${task.recipeId} @ ${task.barrel.alias} 桶内没有成品（可能已被人工提前收取），任务已结束`
@@ -1265,7 +1616,7 @@ export default class BrewModule {
       this.agingTasks.delete(task.id)
       this.deleteAgingTask(task.id)
       this.unlockAfterAgingIfMine()
-      await this.restoreStagedInventory()
+      await this.restoreStagedInventoryWhenIdle()
       await this.notifyAgingOwner(
         task,
         `陈化 ${task.recipeId} @ ${task.barrel.alias} 已完成并入库，暂存物品已取回`
@@ -1344,7 +1695,7 @@ export default class BrewModule {
     await this.reportSafe(`${node.alias} 奶桶不足 (${current}/${required})，尝试自动挤奶 ${need} 桶`)
     debug(`[Brew] 奶桶不足 (${current}/${required})，尝试挤奶 ${need} 桶`)
 
-    await this.ensureEmptyBucket()
+    await this.ensureEmptyBuckets(need)
     const milked = await this.milkCows(need)
     if (milked > 0) {
       await this.attempt(`存奶桶到 ${node.alias}`, async () => {
@@ -1357,12 +1708,16 @@ export default class BrewModule {
           this.configDistance('approach')
         )
         if (!result.success) throw new Error(result.message || '存奶桶失败')
+        if ((result.count ?? 0) < milked) {
+          throw new Error(`奶桶箱空间不足，仅存入 ${result.count ?? 0}/${milked} 桶`)
+        }
       })
       // 挤奶用剩的空桶归还工具箱
       await this.returnBuckets()
     }
 
     await this.assertContainerAmount(node, 'milk_bucket', required)
+    await this.reportSafe(`${node.alias} 奶桶已补足 (${required}/${required})`)
   }
 
   private async countMilkBuckets (node: ContainerRecord): Promise<number> {
@@ -1380,31 +1735,37 @@ export default class BrewModule {
     return result.count ?? 0
   }
 
-  /** 确保背包有至少一个空桶（没有则从工具箱取） */
-  private async ensureEmptyBucket (): Promise<void> {
-    if (this.inventoryCount('bucket') > 0) return
+  /** 按缺口从工具箱领取空桶，避免多桶配方挤完第一桶后没有空桶可用。 */
+  private async ensureEmptyBuckets (required: number): Promise<void> {
+    const current = this.inventoryCount('bucket')
+    if (current >= required) return
+
+    const needed = required - current
     const toolbox = this.requireNode(this.config.toolbox, 'Container', true)
     const result = await this.inventoryActions.takeExactFromContainer(
       toolbox.x,
       toolbox.y,
       toolbox.z,
       'bucket',
-      1,
+      needed,
       this.configDistance('interaction'),
       this.configDistance('approach')
     )
     if (!result.success) {
-      throw new Error(`工具箱中没有空桶: ${result.message || ''}`)
+      throw new Error(`工具箱空桶不足，无法补充奶桶 (${current}/${required}): ${result.message || ''}`)
     }
   }
 
-  /** 就近找牛挤奶，返回成功挤到的桶数 */
+  /**
+   * 就近找牛挤奶，返回成功挤到的桶数。
+   * 同一头牛可连续挤奶，不能只遍历一次，否则配方需要多桶奶时会在第二桶失败。
+   */
   private async milkCows (need: number): Promise<number> {
     const bot = this.requireBot()
     const cows = Object.values(bot.entities)
       .filter(e => e?.type === 'mob' && e?.name === 'cow')
+      // 牛不登记：使用 bot 当前已加载/已感知到的全部牛，选中后再交给寻路接近。
       .map(e => ({ e, dist: bot.entity.position.distanceTo(e.position) }))
-      .filter(entry => entry.dist <= MILK_SEARCH_DISTANCE)
       .sort((a, b) => a.dist - b.dist)
       .map(entry => entry.e)
 
@@ -1414,11 +1775,23 @@ export default class BrewModule {
     }
 
     let milked = 0
-    for (const cow of cows) {
-      if (milked >= need) break
+    let failedAttempts = 0
+    const maxAttempts = Math.max(need * 2, cows.length)
+    for (let attempt = 0; milked < need && attempt < maxAttempts; attempt++) {
       this.assertNotCancelled()
+      const cow = cows[attempt % cows.length]
       const ok = await this.attempt(`挤奶 (${milked + 1}/${need})`, async () => this.milkCow(cow))
-      if (ok) milked++
+      if (ok) {
+        milked++
+        failedAttempts = 0
+      } else {
+        failedAttempts++
+        // 每头可用牛都连续失败一次时，不再原地重复无效交互。
+        if (failedAttempts >= cows.length) break
+      }
+    }
+    if (milked < need) {
+      await this.reportSafe(`自动挤奶仅补到 ${milked}/${need} 桶，将重新检查原料箱库存`)
     }
     return milked
   }
@@ -1511,32 +1884,58 @@ export default class BrewModule {
 
   private async interactWithItem (node: ContainerRecord, itemId: string): Promise<void> {
     const bot = this.requireBot()
-    const approach = await this.inventoryActions.approachBlock(
-      node.x,
-      node.y,
-      node.z,
-      this.configDistance('interaction'),
-      this.configDistance('approach')
-    )
-    if (!approach.success) throw new Error(approach.message || '无法接近方块')
+    let lastError = '交互未完成'
 
-    const block = bot.blockAt(new Vec3(node.x, node.y, node.z))
-    if (!block) throw new Error('方块不可见')
-    const item = findExactMatchingItems(bot.inventory.items(), itemId)[0]
-    if (!item) throw new Error(`背包中没有 ${itemId}`)
-    const beforeCount = this.inventoryCount(itemId)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      this.assertNotCancelled()
+      const approach = await this.inventoryActions.approachBlock(
+        node.x,
+        node.y,
+        node.z,
+        this.configDistance('interaction'),
+        this.configDistance('approach')
+      )
+      if (!approach.success) {
+        lastError = approach.message || '无法接近方块'
+      } else {
+        const block = bot.blockAt(new Vec3(node.x, node.y, node.z))
+        const item = findExactMatchingItems(bot.inventory.items(), itemId)[0]
+        if (!block) {
+          lastError = '方块不可见'
+        } else if (!item) {
+          throw new Error(`背包中没有 ${itemId}`)
+        } else {
+          const beforeCount = this.inventoryCount(itemId)
+          try {
+            // 每次交互都重新装备；失败后重新找站位，避免一直对着被遮挡的同一面。
+            await bot.equip(item, 'hand')
+            await lookAtSmart(bot, block.position.offset(0.5, 0.5, 0.5))
+            await sleep(80)
+            await bot.activateBlock(block)
+            const consumed = await this.waitForCondition(
+              () => this.inventoryCount(itemId) < beforeCount,
+              Math.max(4000, this.config.interactionDelayMs * 4)
+            )
+            if (consumed) {
+              await sleep(this.config.interactionDelayMs)
+              return
+            }
+            lastError = `交互后 ${itemId} 数量未变化`
+          } catch (err) {
+            lastError = (err as Error).message
+          }
+        }
+      }
 
-    // 每次交互都重新装备，奶桶等使用后会变为空桶。
-    await bot.equip(item, 'hand')
-    await bot.activateBlock(block)
-    const consumed = await this.waitForCondition(
-      () => this.inventoryCount(itemId) < beforeCount,
-      Math.max(4000, this.config.interactionDelayMs * 4)
-    )
-    if (!consumed) {
-      throw new Error(`交互后 ${itemId} 数量未变化`)
+      if (attempt < 2) {
+        try { ensurePathfinder(bot).pathfinder.stop() } catch { /* ignore */ }
+        bot.clearControlStates()
+        await escapeStuck(bot, 2)
+        await sleep(250)
+      }
     }
-    await sleep(this.config.interactionDelayMs)
+
+    throw new Error(lastError)
   }
 
   private async isFermenterFull (node: ContainerRecord): Promise<boolean> {

@@ -1,0 +1,13 @@
+{
+  "id": "小麦啤酒",
+  "fermentation": {
+    "duration": "8m",
+    "ingredients": {
+      "小麦": 3
+    }
+  },
+  "aging": {
+    "days": 2,
+    "wood": "birch"
+  }
+}

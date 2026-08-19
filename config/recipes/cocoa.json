@@ -1,0 +1,9 @@
+{
+  "id": "热巧克力",
+  "fermentation": {
+    "duration": "2m",
+    "ingredients": {
+      "曲奇": 3
+    }
+  }
+}

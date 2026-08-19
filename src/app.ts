@@ -13,21 +13,27 @@ import LoopCmd from './features/loopcmd'
 import AntiPVP from './features/antipvp'
 import JumpModule from './features/jump'
 import UseItemModule from './features/useitem'
+import PlaceModule from './features/place'
+import LookModule from './features/look'
+import TimerModule from './features/timer'
 import { resumeBotPhysics } from './actions/shared/entity-utils'
 import TeleportService from './features/teleport/service'
 import TeleportIncomingHandler from './features/teleport/incoming-handler'
 import PlayerInteractionService from './actions/player'
+import HissModule from './features/hiss'
+import WelcomeBindModule from './features/welcome-bind'
 import MinecartInteractionService from './actions/minecart'
 import RidingManager from './features/riding/manager'
 import InventoryActions, { itemDisplayName } from './actions/inventory'
 import ContainerRegistry from './features/container/registry'
 import GameApiService from './api/game-service'
 import SystemMessageBuffer from './features/commands/system-buffer'
-import CommandHandler, { setReloadHook } from './features/commands/handler'
+import CommandHandler from './features/commands/handler'
+import { setReloadHook } from './features/reload'
 import { registerChatListeners } from './features/commands/listeners'
 import BrewModule from './features/brew'
 import AstrbotServer from './api/server'
-import { initLogger, debug, warn, error, closeLogger } from './platform/logger'
+import { initLogger, debug, error, closeLogger } from './platform/logger'
 import { startMemoryWatchdog, stopMemoryWatchdog } from './platform/memory-watchdog'
 import { startChunkPruner, stopChunkPruner } from './platform/chunk-pruner'
 import { startEntityPruner, stopEntityPruner } from './platform/entity-pruner'
@@ -41,7 +47,7 @@ import { startConsoleUI, setStatus, setUiSend } from './platform/console-ui'
  */
 let statusTimer: ReturnType<typeof setInterval> | null = null
 let apiServer: AstrbotServer | null = null
-let currentStop: (() => void) | null = null
+let currentStop: (() => Promise<void>) | null = null
 let appStarted = false
 let reloading = false
 
@@ -53,6 +59,13 @@ function ensureUtf8Console (): void {
   try {
     require('child_process').execSync('chcp 65001 > nul', { stdio: 'ignore' })
   } catch { /* 非控制台/受限环境忽略 */ }
+  // chcp only changes the Windows code page. Explicitly configure Node's
+  // streams too, otherwise supplementary Unicode characters can still be
+  // encoded using the stream's inherited default.
+  try {
+    process.stdout.setDefaultEncoding('utf8')
+    process.stderr.setDefaultEncoding('utf8')
+  } catch { /* 只读/非标准输出流忽略 */ }
 }
 
 /** 与进程/终端绑定的模块不能重新加载（否则 TUI/日志会出现双份单例），其余 src 模块全部清缓存 */
@@ -66,19 +79,18 @@ function clearSrcModuleCache (): void {
   }
 }
 
-export function stopApp (): void {
-  if (currentStop) {
-    currentStop()
-    currentStop = null
-  }
+export async function stopApp (): Promise<void> {
+  const stop = currentStop
+  currentStop = null
   appStarted = false
+  if (stop) await stop()
 }
 
 export async function reloadApp (): Promise<void> {
   if (reloading) return
   reloading = true
   try {
-    stopApp()
+    await stopApp()
     clearSrcModuleCache()
     const fresh = require('./app') as typeof import('./app')
     await fresh.startApp()
@@ -90,7 +102,7 @@ export async function reloadApp (): Promise<void> {
 }
 
 export async function startApp (): Promise<void> {
-  if (appStarted) stopApp()
+  if (appStarted) await stopApp()
   ensureUtf8Console()
 
   const config = loadConfig()
@@ -140,7 +152,11 @@ export async function startApp (): Promise<void> {
   startEntityPruner(mcBot)
   const jumpModule = new JumpModule(mcBot)
   const useItemModule = new UseItemModule(mcBot)
+  const placeModule = new PlaceModule(useItemModule)
+  useItemModule.setBedrockBreakGuard(() => placeModule.isBedrockBreak())
+  const lookModule = new LookModule(mcBot, placeModule)
   const loopCmd = new LoopCmd(mcBot, config.loopCmd)
+  const timerModule = new TimerModule()
   const antiPVP = new AntiPVP(mcBot)
 
   const systemBuffer = new SystemMessageBuffer()
@@ -152,11 +168,12 @@ export async function startApp (): Promise<void> {
     config.botIdentity.baseMaxZ
   )
   const teleportService = new TeleportService(mcBot, config.teleport)
-  const teleportConfigFile = process.env.BOT_TELEPORT_CONFIG || 'teleport.json'
+  const teleportConfigFile = 'teleport.json'
   teleportService.setConfigPath(path.join(GAME_CONFIG_DIR, teleportConfigFile))
+  teleportService.setCommandPrefix(config.command.prefix)
   teleportService.setDb(db, config.botPhome.name || config.minecraft.username || 'bot')
   // 小镇委托映射：主 bot 门控 + 同镇代执行（依赖 setDb 设置的 _botName）
-  teleportService.setPhomeTowns(config.phomeTowns, GAME_CONFIG_DIR)
+  teleportService.setPhomeTowns(config.phomeTowns)
   teleportService.setOnUnlock(({ wasHover }) => {
     if (wasHover && mcBot.bot) {
       resumeBotPhysics(mcBot.bot)
@@ -167,6 +184,9 @@ export async function startApp (): Promise<void> {
     config.bot.interactionDistance,
     config.bot.approachDistance
   )
+  const hissModule = new HissModule(mcBot)
+  const welcomeBindModule = new WelcomeBindModule(mcBot)
+  antiPVP.setSuppressedChecker(() => hissModule.isActive())
   const minecartInteraction = new MinecartInteractionService(
     mcBot,
     config.bot.interactionDistance,
@@ -191,7 +211,6 @@ export async function startApp (): Promise<void> {
     inventoryActions,
     useItemModule,
     config.bot.interactionDistance,
-    config.bot.approachDistance,
     db,
     config.botIdentity.index
   )
@@ -202,18 +221,22 @@ export async function startApp (): Promise<void> {
     () => teleportService.getLockedNote() === '陈化'
   )
   brewModule.register()
-  standbyManager.setBusyChecker(() => brewModule.isRunning())
+  standbyManager.setBusyChecker(() => brewModule.shouldPreventStandbyHome())
   const gameApiService = new GameApiService(mcBot, whitelist)
   const commandHandler = new CommandHandler(
     mcBot,
     teleportService,
     gameApiService,
     playerInteraction,
+    hissModule,
     minecartInteraction,
     ridingManager,
     jumpModule,
     useItemModule,
+    placeModule,
+    lookModule,
     loopCmd,
+    timerModule,
     db,
     containerRegistry,
     inventoryActions,
@@ -239,9 +262,15 @@ export async function startApp (): Promise<void> {
   mcBot.onSpawn(() => {
     // 重连后恢复持久化状态（锁、骑乘、拉特兰成员、酿酒任务等存在 DB 里，不会因掉线丢失）
     teleportService.restoreLockState()
+    // A hiss task only exists in memory and cannot survive a process restart.
+    // Do not restore its persistent movement lock as an active task.
+    if (teleportService.getLockedNote() === '哈气' && !hissModule.isActive()) {
+      teleportService.unlock()
+      debug('[Hiss] Cleared stale lock after restart')
+    }
     commandHandler.restoreLatelanMembers()
     void brewModule.restorePersisted()
-    registerChatListeners(mcBot, commandHandler, teleportHandler, systemBuffer)
+    registerChatListeners(mcBot, commandHandler, teleportHandler, systemBuffer, welcomeBindModule)
     ridingManager.start()
     ridingManager.tryRestoreMount()
     standbyManager.start()
@@ -279,19 +308,27 @@ export async function startApp (): Promise<void> {
         dim = String(dimRaw)
       }
 
+      const brewStatus = brewModule.status()
+      const agingCount = brewStatus.aging?.length ?? 0
+      const brewQueueCount = brewStatus.queue?.length ?? 0
+
       const state = ready
         ? teleportService.isLocked() ? '锁定'
-          : brewModule.isRunning() ? `酿酒(${brewModule.status().phase || '-'})`
+          : brewStatus.running ? `酿酒(${brewStatus.phase || '-'})`
             : jumpModule.isActive() ? '跳跃'
-              : useItemModule.isActive() ? '使用/放置'
+              : placeModule.isActive() ? '放置'
+                : useItemModule.isActive() ? '使用'
                 : ridingManager.isActive() ? (ridingManager.getMode() === 'minecart' ? '坐矿车' : '骑乘')
                   : '空闲'
         : '断开'
 
-      const brewStatus = brewModule.status()
-      const brewDetail = brewStatus.running
-        ? `${brewStatus.recipe || '-'} ${brewStatus.detail || brewStatus.phase || ''}`.trim()
-        : null
+      const brewParts: string[] = []
+      if (brewStatus.running) {
+        brewParts.push(`酿造 ${brewStatus.recipe || '-'} ${brewStatus.detail || brewStatus.phase || ''}`.trim())
+      }
+      if (agingCount > 0) brewParts.push(`陈化 ${agingCount} 桶`)
+      if (brewQueueCount > 0) brewParts.push(`队列 ${brewQueueCount}`)
+      const brewDetail = brewParts.length > 0 ? brewParts.join(' | ') : null
 
       const timeOfDay = bot.time?.isDay != null
         ? (bot.time.isDay ? '白天' : '夜晚')
@@ -333,7 +370,7 @@ export async function startApp (): Promise<void> {
   }
 
   // 登记本次运行实例的清理函数（重载/退出时调用）
-  currentStop = () => {
+  currentStop = async () => {
     stopViewer(mcBot.bot)
     stopChunkPruner()
     stopEntityPruner()
@@ -342,9 +379,9 @@ export async function startApp (): Promise<void> {
     standbyManager.stop()
     loopCmd.stop()
     antiPVP.stop()
-    brewModule.cancel()
+    await brewModule.stop()
     brewModule.dispose()
-    commandHandler.disposeTimers()
+    timerModule.dispose()
     teleportService.stop()
     if (apiServer) { apiServer.stop(); apiServer = null }
     messageQueue.clear()

@@ -5,7 +5,7 @@ import type { Bot } from 'mineflayer'
 import type { Window } from 'prismarine-windows'
 import type { ServiceResult } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
-import { ensurePathfinder, gotoWithEscape } from '../shared/entity-utils'
+import { ensurePathfinder, escapeStuck, gotoWithEscape } from '../shared/entity-utils'
 import { debug } from '../../platform/logger'
 import { goals } from 'mineflayer-pathfinder'
 import { sleep } from '../../platform/sleep'
@@ -58,8 +58,17 @@ function componentData (item: Item, type: string): unknown {
   return (item as ComponentItem).componentMap?.get(type)?.data
 }
 
+function primitiveValue (value: unknown): unknown {
+  if (value && typeof value === 'object' && 'value' in value) {
+    return (value as { value?: unknown }).value
+  }
+  return value
+}
+
 function potionIdOf (item: Item): string | undefined {
-  const legacyPotion = (item.nbt as { value?: { Potion?: { value?: unknown } } } | null)?.value?.Potion?.value
+  const legacyPotion = primitiveValue(
+    (item.nbt as { value?: { Potion?: { value?: unknown } } } | null)?.value?.Potion
+  )
   if (typeof legacyPotion === 'string') return normalizeItemKey(legacyPotion)
 
   const component = componentData(item, 'potion_contents') as {
@@ -67,21 +76,31 @@ function potionIdOf (item: Item): string | undefined {
     potion?: unknown
   } | undefined
   if (!component) return undefined
-  if (typeof component.potion === 'string') return normalizeItemKey(component.potion)
-  if (typeof component.potionId === 'number') return vanillaPotionIds[component.potionId]
+  const potion = primitiveValue(component.potion)
+  const potionId = primitiveValue(component.potionId)
+  if (typeof potion === 'string') return normalizeItemKey(potion)
+  if (typeof potionId === 'number') return vanillaPotionIds[potionId]
   return undefined
 }
 
 function ominousBottleLevelText (item: Item): string | undefined {
-  const amplifier = componentData(item, 'ominous_bottle_amplifier')
+  const amplifier = primitiveValue(componentData(item, 'ominous_bottle_amplifier'))
   if (typeof amplifier !== 'number' || amplifier < 0 || amplifier > 4) return undefined
   return ['I级', 'II级', 'III级', 'IV级', 'V级'][amplifier]
 }
 
-function potionDurationText (potionId: string): string | undefined {
+function potionDurationText (itemId: string, potionId: string): string | undefined {
   const variant = potionId.startsWith('long_') ? 'long' : potionId.startsWith('strong_') ? 'strong' : 'normal'
   const effect = potionId.replace(/^(long|strong)_/, '')
-  const seconds = potionDurations[effect]?.[variant]
+  const baseSeconds = potionDurations[effect]?.[variant]
+  if (!baseSeconds) return undefined
+
+  // Minecraft shortens effects based on how the item is delivered.
+  const multiplier = itemId === 'splash_potion' ? 0.75
+    : itemId === 'lingering_potion' ? 0.25
+      : itemId === 'tipped_arrow' ? 0.125
+        : 1
+  const seconds = Math.floor(baseSeconds * multiplier)
   if (!seconds) return undefined
   const minutes = Math.floor(seconds / 60)
   const remainder = seconds % 60
@@ -91,7 +110,8 @@ function potionDurationText (potionId: string): string | undefined {
 function potionLevelText (potionId: string): string | undefined {
   const strong = potionId.startsWith('strong_')
   const effect = potionId.replace(/^(long|strong)_/, '')
-  if (effect === 'slowness' || effect === 'turtle_master') return strong ? 'VI级' : 'IV级'
+  if (effect === 'slowness') return strong ? 'IV级' : 'I级'
+  if (effect === 'turtle_master') return strong ? 'VI级' : 'IV级'
   if (['leaping', 'swiftness', 'healing', 'harming', 'poison', 'regeneration', 'strength'].includes(effect)) {
     return strong ? 'II级' : 'I级'
   }
@@ -112,7 +132,7 @@ export function itemDisplayName (item: Item): string {
   const effect = potionId.replace(/^(long|strong)_/, '')
   const effectName = cnName(`${itemId}.effect.${effect}`)
   const level = potionLevelText(potionId)
-  const duration = potionDurationText(potionId)
+  const duration = potionDurationText(itemId, potionId)
   const details = [level, duration].filter((value): value is string => value != null)
   return details.length > 0 ? `${effectName}（${details.join('，')}）` : effectName
 }
@@ -244,13 +264,9 @@ export default class InventoryActions {
 
     const target = new Vec3(x + 0.5, y + 0.5, z + 0.5)
     const distance = bot.entity.position.distanceTo(target)
-    if (distance > approachDistance) {
-      return {
-        success: false,
-        message: `容器超过 ${approachDistance} 格 (当前 ${distance.toFixed(1)} 格)`
-      }
-    }
-
+    // approachDistance 仅作为配置兼容项保留；已登记的容器不设搜索半径，
+    // 距离较远时统一先寻路到交互距离，再检查可见面并打开容器。
+    void approachDistance
     if (distance > interactionDistance) {
       const result = await gotoWithEscape(bot, target, interactionDistance)
       if (!result.success) return result
@@ -274,18 +290,27 @@ export default class InventoryActions {
       bot.world,
       { reach: 4.5, entityHeight: bot.entity.height ?? 1.6 }
     )
-    try {
-      const gotoP = pfBot.pathfinder.goto(goal)
-      gotoP.catch(() => { /* ignore */ })
-      await Promise.race([
-        gotoP,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('摆位超时')), 4_000))
-      ])
-      await sleep(100)
-    } catch {
-      // 摆位失败不阻断主流程，后续交互重试会再处理
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const gotoP = pfBot.pathfinder.goto(goal)
+        gotoP.catch(() => { /* handled below */ })
+        await Promise.race([
+          gotoP,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('摆位超时')), 4_000))
+        ])
+        await sleep(100)
+        return { success: true }
+      } catch {
+        try { pfBot.pathfinder.stop() } catch { /* ignore */ }
+        bot.clearControlStates()
+        if (attempt === 2) break
+        await escapeStuck(bot, 2)
+        await sleep(250)
+      }
     }
-    return { success: true }
+
+    return { success: false, message: '无法找到可交互的方块面' }
   }
 
   async storeInContainer (

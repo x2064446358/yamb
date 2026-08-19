@@ -46,7 +46,7 @@ export default class PlayerInteractionService {
   }
 
   async mount (targetName: string): Promise<ServiceResult> {
-    return this.interactWithPlayer(targetName, 'mount')
+    return this.interactWithPlayer(targetName, 'mount', Math.max(this.approachDistance, 32))
   }
 
   async attack (targetName: string): Promise<ServiceResult> {
@@ -54,26 +54,42 @@ export default class PlayerInteractionService {
   }
 
   async remountPlayer (targetName: string): Promise<boolean> {
+    if (!this.mcBot.isReady || !this.mcBot.bot) return false
+
+    // 意外下坐后玩家常已移动；每轮都重新读取实体和位置，再靠近而非对旧坐标反复右键。
+    const seekDistance = Math.max(this.approachDistance, 32)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const bot = this.mcBot.bot
+      if (!this.mcBot.isReady || !bot) return false
+      const entity = getPlayerEntity(bot, targetName)
+      if (!entity) {
+        debug(`[Interaction] 重坐时未找到玩家 ${targetName} (${attempt}/3)`)
+        if (attempt < 3) await sleep(500)
+        continue
+      }
+
+      const approach = await approachEntity(
+        bot,
+        entity,
+        this.interactionDistance,
+        seekDistance
+      )
+      if (!approach.success) {
+        debug(`[Interaction] 重坐靠近 ${targetName} 失败 (${attempt}/3): ${approach.message || '未知错误'}`)
+      } else if (await this.tryMountPlayer(bot, targetName, 2)) {
+        return true
+      }
+
+      if (attempt < 3) await sleep(350)
+    }
     const bot = this.mcBot.bot
-    if (!this.mcBot.isReady || !bot) return false
-
-    const entity = getPlayerEntity(bot, targetName)
-    if (!entity) return false
-
-    const approach = await approachEntity(
-      bot,
-      entity,
-      this.interactionDistance,
-      this.approachDistance
-    )
-    if (!approach.success) return false
-
-    return this.tryMountPlayer(bot, targetName)
+    return !!bot && isMountedOnPlayer(bot, targetName)
   }
 
   private async interactWithPlayer (
     targetName: string,
-    action: 'mount' | 'attack'
+    action: 'mount' | 'attack',
+    seekDistance = this.approachDistance
   ): Promise<ServiceResult> {
     const bot = this.mcBot.bot
     if (!this.mcBot.isReady || !bot) {
@@ -89,7 +105,7 @@ export default class PlayerInteractionService {
       bot,
       entity,
       this.interactionDistance,
-      this.approachDistance
+      seekDistance
     )
     if (!approach.success) return approach
 
@@ -118,14 +134,17 @@ export default class PlayerInteractionService {
     }
   }
 
-  private async tryMountPlayer (bot: Bot, targetName: string): Promise<boolean> {
-    const maxAttempts = 4
+  private async tryMountPlayer (bot: Bot, targetName: string, maxAttempts = 4): Promise<boolean> {
     await bot.unequip('hand')
     await sleep(100)
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const entity = getPlayerEntity(bot, targetName)
       if (!entity) return false
+      if (entityDistance(bot, entity) > this.interactionDistance + 0.5) {
+        debug(`[Interaction] ${targetName} 已离开交互范围，重新寻路`)
+        return false
+      }
 
       const lookPoint = entityLookPoint(entity)
       await bot.activateEntityAt(entity, lookPoint)

@@ -25,7 +25,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 
 /** 清理距 bot 超过 radius 的非玩家、非载具实体，返回清理数量 */
 export function pruneFarEntities (bot: Bot, radius: number): number {
-  const entities = bot.entities as unknown as Record<string, { type?: string }>
+  const entities = bot.entities as unknown as Record<string, { type?: string; name?: string }>
   const self = bot.entity
   const vehicle = (bot as unknown as { vehicle?: unknown }).vehicle
   const entityVehicle = (self as unknown as { vehicle?: unknown }).vehicle
@@ -36,6 +36,9 @@ export function pruneFarEntities (bot: Bot, radius: number): number {
     const e = entities[id]
     if (!e || e === self) continue
     if (e.type === 'player') continue
+    // Automatic brewing searches known cows and pathfinds to them. Keep cow
+    // entities available even when they are outside the generic cleanup radius.
+    if (e.type === 'mob' && e.name === 'cow') continue
     // 载具/骑乘对象（含插件云座）不能清，否则破坏骑乘/滞空逻辑
     if (e === vehicle || e === entityVehicle) continue
 

@@ -4,7 +4,7 @@ import type { ServiceResult } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import { sleep } from '../../platform/sleep'
 import { debug } from '../../platform/logger'
-import { ensurePathfinder, getEntityVehicle, getPlayerEntity, getVehicle, isRideableEntity, lookAnglesSmart, lookAtSmart, eyeHeightOf } from '../../actions/shared/entity-utils'
+import { ensurePathfinder, getEntityVehicle, getVehicle, isRideableEntity, lookAnglesSmart, lookAtSmart, eyeHeightOf } from '../../actions/shared/entity-utils'
 import { resolveItemKey, cnName } from '../../actions/inventory'
 import { goals } from 'mineflayer-pathfinder'
 
@@ -88,7 +88,6 @@ export default class UseItemModule {
   private count = 0
   private interval = 4
   private intervalText = '0.2s'
-  private timer = 0
   private isPlace = false
   private intervalHandle: ReturnType<typeof setInterval> | null = null
   private actionInProgress = false
@@ -111,12 +110,17 @@ export default class UseItemModule {
   private breakOwner: string | null = null
   /** 破基岩模式开关回调（active=true 启动、false 停止），用于外部联动锁定 */
   private onBreakChange: ((active: boolean, owner: string | null) => void) | null = null
+  /** 由 PlaceModule 注入：破基岩追踪时禁止其他物品操作抢占循环。 */
+  private isBedrockBreakProtected: () => boolean = () => false
 
   constructor(mcBot: MinecraftBot) {
     this.mcBot = mcBot
   }
 
   isActive(): boolean { return this.active }
+
+  /** 当前是否由放置功能占用循环（相对放置或破基岩追踪）。 */
+  isPlacing (): boolean { return this.active && this.isPlace }
 
   /** 是否处于"破基岩"追踪放置模式（放置 <方块名> 且正在执行） */
   isBedrockBreak(): boolean {
@@ -128,53 +132,17 @@ export default class UseItemModule {
     this.onBreakChange = fn
   }
 
+  setBedrockBreakGuard (fn: () => boolean): void {
+    this.isBedrockBreakProtected = fn
+  }
+
   private notifyBreakChange (): void {
     this.onBreakChange?.(this.isBedrockBreak(), this.breakOwner)
   }
 
-  /** 真正把 look 包发出去（force=false），带超时防止卡死；并记录视线实际命中的方块作为放置参照 */
-  private sendLook (bot: Bot, yawDeg: number, pitchDeg: number): void {
-    try {
-      const tp = lookAnglesSmart(bot, yawDeg, pitchDeg, 10)
-      Promise.race([
-        lookAtSmart(bot, tp, false),
-        new Promise(resolve => setTimeout(resolve, 500))
-      ]).catch(() => { /* */ })
-      // lookAnglesSmart 已同步更新 entity.yaw/pitch，立即用新朝向射线锁定 bot 看向的方块
-      this.lookTarget = this.currentLookBlock(bot)?.position ?? tp
-    } catch { /* */ }
-  }
-
-  look(yawDeg: number, pitchDeg: number): string {
-    const bot = this.mcBot.bot
-    if (bot) this.sendLook(bot, yawDeg, pitchDeg)
-    return `已看向 横${yawDeg}° 纵${pitchDeg}°`
-  }
-
-  /** 查询玩家当前朝向角度（横=方位角, 纵=俯仰角），并让 bot 看向同一角度 */
-  lookPlayer(playerName: string): string | null {
-    const bot = this.mcBot.bot
-    if (!bot) return null
-    const player = getPlayerEntity(bot, playerName)
-    if (!player) return null
-
-    const yawDeg = ((Math.PI - player.yaw) * 180 / Math.PI + 180 + 360) % 360 - 180
-    const pitchDeg = -player.pitch * 180 / Math.PI
-    this.sendLook(bot, yawDeg, pitchDeg)
-    return `玩家 ${playerName} 正在看向 横${yawDeg.toFixed(1)}° 纵${pitchDeg.toFixed(1)}°`
-  }
-
-  /** 看向指定坐标 (x, y, z)，并记录该方块作为放置参照 */
-  async lookAtCoord (x: number, y: number, z: number): Promise<string> {
-    const bot = this.mcBot.bot
-    if (!bot) return '机器人未就绪'
-    this.lookTarget = new Vec3(x, y, z)
-    try {
-      await lookAtSmart(bot, new Vec3(x + 0.5, y + 0.5, z + 0.5), false)
-    } catch (err) {
-      return `看向失败: ${(err as Error).message}`
-    }
-    return `已看向 ${x}, ${y}, ${z}`
+  /** Look 模块记录的参照方块；相对放置会优先使用它。 */
+  setLookTarget (target: Vec3): void {
+    this.lookTarget = target
   }
 
   stop(): string {
@@ -183,7 +151,26 @@ export default class UseItemModule {
     return '已停止使用。'
   }
 
+  /** Stop only an active use-item loop; do not consume a place loop. */
+  stopUse(): string {
+    if (!this.active || this.isPlace) return '\u5f53\u524d\u672a\u5728\u4f7f\u7528\u3002'
+    this.clear()
+    return '\u5df2\u505c\u6b62\u4f7f\u7528\u3002'
+  }
+
+  /** Stop only an active place loop; do not consume a use loop. */
+  stopPlace(): string {
+    if (!this.active || !this.isPlace) return '\u5f53\u524d\u672a\u5728\u653e\u7f6e\u3002'
+    this.clear()
+    return '\u5df2\u505c\u6b62\u653e\u7f6e\u3002'
+  }
+
   startUse(countStr: string, onComplete?: () => void, onFailed?: () => void): string {
+    const first = countStr.trim().split(/\s+/)[0]?.toLowerCase() || ''
+    if (first === 'stop' || first === '\u505c\u6b62') return this.stopUse()
+    if (this.isBedrockBreakProtected()) {
+      return '破基岩追踪放置进行中；请先执行 放置 停止 后再使用物品。'
+    }
     this.isPlace = false
     const result = this.start(countStr)
     // start() may clear a previous loop, so bind the new callback afterwards.
@@ -200,7 +187,7 @@ export default class UseItemModule {
     const bot = this.mcBot.bot
     const parts = args.trim().split(/\s+/).filter(Boolean)
     const first = parts[0] || ''
-    if (first === '停止' || first === 'stop') return this.stop()
+    if (first === 'stop' || first === '\u505c\u6b62') return this.stopPlace()
 
     // 新命令以最新为准：先清旧循环，避免 start 内部 clear 清掉刚设置的目标状态
     if (this.active) this.clear()
@@ -265,7 +252,6 @@ export default class UseItemModule {
 
     this.interval = parsed.interval
     this.intervalText = parsed.intervalText
-    this.timer = 0
 
     if (parsed.countStr === '无限次' || parsed.countStr === '无限' || parsed.countStr === 'infinite') {
       this.active = true
@@ -299,6 +285,9 @@ export default class UseItemModule {
     const bot = this.mcBot.bot
     if (!bot || !this.mcBot.isReady) {
       return { success: false, message: '机器人未就绪' }
+    }
+    if (this.isBedrockBreakProtected()) {
+      return { success: false, code: 'break_active', message: '破基岩追踪放置进行中，请先执行 放置 停止' }
     }
 
     // 新装水命令打断任何正在进行的 use/place 循环，避免抢物品
@@ -501,7 +490,6 @@ export default class UseItemModule {
     this.infinite = false
     this.isPlace = false
     this.count = 0
-    this.timer = 0
     this.placeTargetName = null
     this.relTarget = null
     this.relDir = null
@@ -602,9 +590,9 @@ export default class UseItemModule {
    * 追踪放置：锁定第一块楼梯，真实放置扫描角度（每次机器推进换一个角度），
    * 校准出能出"朝下活塞"的角度后锁定复用。
    */
-  private async placeTracked (bot: Bot): Promise<void> {
+  private async placeTracked (bot: Bot): Promise<boolean> {
     const name = this.placeTargetName
-    if (!name) return
+    if (!name) return false
     const searchPoint = this.currentPos(bot)
     // 锁定第一块（最近的）石砖楼梯，搜索半径与放置距离限制一致
     const target = bot.findBlock({
@@ -614,19 +602,19 @@ export default class UseItemModule {
     })
     if (!target) {
       console.warn(`[UseItem] 附近 10 格内没找到 ${cnName(name)}`)
-      return
+      return false
     }
     // 放置距离限制：10 格（kades 若支持更长交互距离）
     const reach = 10
     const dist = searchPoint.distanceTo(target.position)
     if (dist > reach) {
-      return
+      return false
     }
     const down = new Vec3(0, -1, 0)
     const dest = target.position.plus(down)
     // 下方为空才放，避免机器自身已放活塞时重复放置导致故障
     if (!isAirBlock(bot.blockAt(dest))) {
-      return
+      return false
     }
 
     // 选择本次角度：已校准则用锁定的，否则按游标取下一个候选
@@ -647,8 +635,10 @@ export default class UseItemModule {
     let confirmed = false
     const gpb = bot as GenericPlaceBot
     if (typeof gpb._genericPlace === 'function') {
+      // Register first so the packet's block update cannot be missed.
+      const updated = this.waitForBlockUpdate(bot, dest, 800)
       await gpb._genericPlace(target, down, { forceLook: 'ignore', swingArm: 'right' })
-      confirmed = await this.waitForBlockUpdate(bot, dest, 800)
+      confirmed = await updated
     } else {
       try {
         await Promise.race([
@@ -668,33 +658,36 @@ export default class UseItemModule {
         debug(`[UseItem] 已校准锁定朝下角度 横${angle.yaw.toFixed(1)}° 纵${angle.pitch.toFixed(1)}°`)
       }
     }
+    return !!placed && placed.name === 'piston' && facing === 'down'
   }
 
   /** 按模式分发放置：追踪（破基岩）或相对（放置 <方向>） */
-  private async placeOnce (bot: Bot): Promise<void> {
+  private async placeOnce (bot: Bot): Promise<boolean> {
     if (this.placeTargetName) {
-      await this.placeTracked(bot)
-      return
+      return this.placeTracked(bot)
     }
     if (this.relTarget && this.relDir) {
-      await this.placeRelative(bot)
+      return this.placeRelative(bot)
     }
+    return false
   }
 
   /** 相对放置：在选定参照方块（当前看向）的指定方向相邻格放方块 */
-  private async placeRelative (bot: Bot): Promise<void> {
-    if (!this.relTarget || !this.relDir) return
+  private async placeRelative (bot: Bot): Promise<boolean> {
+    if (!this.relTarget || !this.relDir) return false
     const target = bot.blockAt(this.relTarget)
-    if (!target) return
+    if (!target) return false
     const dest = this.relTarget.plus(this.relDir)
     // 目标位置已有方块则跳过（避免重复放置顶掉已有方块）
-    if (!isAirBlock(bot.blockAt(dest))) return
+    if (!isAirBlock(bot.blockAt(dest))) return false
     const gpb = bot as unknown as GenericPlaceBot
     if (typeof gpb._genericPlace === 'function') {
       await gpb._genericPlace(target, this.relDir, { forceLook: 'ignore', swingArm: 'right' })
     } else {
       await bot.placeBlock(target, this.relDir)
     }
+    await sleep(120)
+    return !isAirBlock(bot.blockAt(dest))
   }
 
   /**
@@ -729,8 +722,7 @@ export default class UseItemModule {
       // 持续使用/放置期间续高位视距保持（15s 窗口），循环不断视距不掉；停止后自动回落
       this.mcBot.requestHighView()
       if (this.isPlace) {
-        await this.placeOnce(bot)
-        return true
+        return await this.placeOnce(bot)
       } else {
         return await this.useHeldItemAndConfirm(bot)
       }

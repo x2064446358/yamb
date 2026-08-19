@@ -3,21 +3,25 @@ import { debug, warn, error } from './platform/logger'
 import { stopConsoleUI } from './platform/console-ui'
 
 // 进程信号与全局异常处理只注册一次（index.ts 作为入口不会被重载）
-function shutdown (): void {
+let shuttingDown = false
+async function shutdown (exitCode = 0): Promise<void> {
+  if (shuttingDown) return
+  shuttingDown = true
   debug('[Main] Shutting down...')
   stopConsoleUI()
-  stopApp()
-  process.exit(0)
+  try {
+    await stopApp()
+  } finally {
+    process.exit(exitCode)
+  }
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => { void shutdown(0) })
+process.on('SIGTERM', () => { void shutdown(0) })
 
 process.on('uncaughtException', (err) => {
   error('[Main] Uncaught exception:', err)
-  stopConsoleUI()
-  stopApp()
-  process.exit(1)
+  void shutdown(1)
 })
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -31,6 +35,5 @@ process.on('unhandledRejection', (reason, promise) => {
 
 startApp().catch(err => {
   console.error('[Main] Fatal error:', err)
-  stopApp()
-  process.exit(1)
+  void shutdown(1)
 })

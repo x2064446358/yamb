@@ -9,6 +9,7 @@ declare module 'mineflayer-pathfinder' {
     allowParkour?: boolean
     allowSprinting?: boolean
     allowFreeMotion?: boolean
+    canOpenDoors?: boolean
   }
 
   export namespace goals {

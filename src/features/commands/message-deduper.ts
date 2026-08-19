@@ -9,7 +9,10 @@ export default class MessageDeduper {
   shouldSkip (username: string, message: string): boolean {
     const text = message.trim()
     if (!text || !username) return true
-    return this.isSeen(`msg:${username}:${text}`)
+    // Some chat plugins emit the same line twice: once as plain text and
+    // once with their decorative trailing "喵~" suffix. Treat that suffix
+    // as presentation-only for the short duplicate window.
+    return this.isSeen(`msg:${username}:${dedupeText(text)}`)
   }
 
   shouldSkipSystem (text: string): boolean {
@@ -38,4 +41,9 @@ export default class MessageDeduper {
     this.recent.set(key, now)
     return false
   }
+}
+
+function dedupeText (text: string): string {
+  const normalized = text.trim().replace(/\s*喵(?:~|～)\s*$/u, '')
+  return normalized || text.trim()
 }

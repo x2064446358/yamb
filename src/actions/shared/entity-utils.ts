@@ -32,6 +32,7 @@ export function ensurePathfinder (bot: Bot): BotWithPathfinder {
     movements.allow1by1towers = false
     movements.allowParkour = true
     movements.allowSprinting = true
+    movements.canOpenDoors = true
     b.pathfinder.setMovements(movements)
     b._mchatbotPathfinderReady = true
   }
@@ -196,14 +197,16 @@ export function isMountedOnPlayer (bot: Bot, playerName: string): boolean {
 export function isMountedOnMinecart (bot: Bot): boolean {
   const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
   if (!vehicle || !isMinecartEntity(vehicle)) return false
-  return entityDistance(bot, vehicle) < 2.5
+  // 骑乘移动中的矿车时，mineflayer 可能不再同步 bot.entity 的坐标；
+  // 不能再用 bot 与矿车的距离判断，否则矿车离开原坐标后会被误判为已下车。
+  return true
 }
 
 /** 是否正骑乘任意可骑乘实体（矿车/船/马/猪） */
 export function isMountedOnVehicle (bot: Bot): boolean {
   const vehicle = getVehicle(bot) ?? getEntityVehicle(bot)
   if (!vehicle || !isRideableEntity(vehicle)) return false
-  return entityDistance(bot, vehicle) < 2.5
+  return true
 }
 
 /** 离开插件 AEC 坐骑：以潜行为主（bot.dismount 对此类载具常报 not mounted） */
@@ -542,7 +545,7 @@ export async function gotoWithEscape (
     const escaped = await escapeStuck(bot)
     await sleep(300)
     if (near()) return { success: true }
-    if (!escaped) {
+    if (!escaped && attempt === 3) {
       return { success: false, message: '无法接近目标: 位置被卡住，挣脱失败' }
     }
   }

@@ -1,24 +1,27 @@
 import { Vec3 } from 'vec3'
-import { spawn } from 'child_process'
 import type { BotBehaviorConfig, CommandConfig, MessagesConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type GameApiService from '../../api/game-service'
 import type TeleportService from '../teleport/service'
+import PhomeCommands from '../teleport/phome-commands'
+import PhomeAdminCommands from '../teleport/phome-admin-commands'
 import type Whitelist from '../../permissions/whitelist'
 import type StandbyManager from '../standby/manager'
 import type PlayerInteractionService from '../../actions/player'
+import type HissModule from '../hiss'
 import type MinecartInteractionService from '../../actions/minecart'
 import type RidingManager from '../riding/manager'
 import type ContainerRegistry from '../container/registry'
+import ContainerCommands from '../container/commands'
 import type InventoryActions from '../../actions/inventory'
-import { cnName, findMatchingItems, itemDisplayName } from '../../actions/inventory'
+import InventoryCommandModule from '../inventory'
 import type SystemMessageBuffer from './system-buffer'
 import type LoopCmd from '../loopcmd'
+import type TimerModule from '../timer'
 import CommandMessages from './messages'
 import { sleep } from '../../platform/sleep'
 import { info, warn, debug } from '../../platform/logger'
 import { isMountedOnPlayer, approachEntity } from '../../actions/shared/entity-utils'
-import { getTargetContainerBlock } from '../container/utils'
 import {
   type CommandSource,
   matchesPrefix,
@@ -28,39 +31,30 @@ import {
 } from './parser'
 import type JumpModule from '../jump'
 import type UseItemModule from '../useitem'
+import type PlaceModule from '../place'
+import type LookModule from '../look'
 import { lookEnchant } from '../enchant'
 import type BrewModule from '../brew'
-import { getNodeBlockAt } from '../brew/block-node-utils'
-import { normalizeItemKey } from '../../actions/inventory'
+import BrewNodeCommands from '../brew/node-commands'
+import { reloadBot } from '../reload'
 
 import type { DatabaseSync } from 'node:sqlite'
-
-/** 进程内软重启钩子：由 app 层注册（重载时重建模块并重连），未注册时退化为 spawn 重启 */
-let reloadHook: (() => void) | null = null
-export function setReloadHook (fn: () => void): void { reloadHook = fn }
-
-/** 定时任务：到点私信玩家，纯内存提醒，不锁定 bot */
-interface TimerEntry {
-  username: string
-  label: string
-  /** 到点时间戳(ms)，用于排序展示剩余 */
-  finishAt: number
-  /** 展示用时长（如 "12分钟"、"1小时30分钟"） */
-  display: string
-  handle: ReturnType<typeof setTimeout>
-}
 
 export default class CommandHandler {
   private mcBot: MinecraftBot
   private teleportService: TeleportService
   private gameApiService: GameApiService
   private playerInteraction: PlayerInteractionService
+  private hissModule: HissModule
   private minecartInteraction: MinecartInteractionService
   private ridingManager: RidingManager
   private loopCmd: LoopCmd
+  private timerModule: TimerModule
   private db: DatabaseSync
   private jumpModule: JumpModule
   private useItemModule: UseItemModule
+  private placeModule: PlaceModule
+  private lookModule: LookModule
   private botIndex: number
   /** 公屏 %挂机 认领：等待所有繁忙 bot 确认无人认领后，才回复"全部繁忙" */
   private static readonly TPA_ARBITRATION_MS = 3000
@@ -70,14 +64,16 @@ export default class CommandHandler {
   private static readonly TPA_RESOLVE_GRACE_MS = 10000
   /** 全部繁忙提示行 TTL */
   private static readonly TPA_BUSY_TTL_MS = 30000
-  /** 锁定的 owner 静默后等待同镇 bot 认领的窗口；超时无认领则回复「捷运繁忙」 */
-  private static readonly PHOME_DELEGATE_FALLBACK_MS = 2500
+  private phomeCommands: PhomeCommands
+  private phomeAdminCommands: PhomeAdminCommands
   private containerRegistry: ContainerRegistry
-  private inventoryActions: InventoryActions
+  private containerCommands: ContainerCommands
+  private inventoryCommand: InventoryCommandModule
   private systemBuffer: SystemMessageBuffer
   private whitelist: Whitelist
   private standby: StandbyManager
   private brewModule: BrewModule
+  private brewNodeCommands: BrewNodeCommands
   /** brew 开始时的转场 tpa：传送完成后不锁定 */
   private brewTpaRelocate = false
   private messages: CommandMessages
@@ -85,10 +81,8 @@ export default class CommandHandler {
   private adminList: Set<string>
   private allowPublicCommands: boolean
   private replyAlwaysWhisper: boolean
-  private replyDelayMs: number
   private forwardWaitMs: number
   private interactionDistance: number
-  private approachDistance: number
   private _lastCmd?: { key: string; time: number }
 
   constructor (
@@ -96,11 +90,15 @@ export default class CommandHandler {
     teleportService: TeleportService,
     gameApiService: GameApiService,
     playerInteraction: PlayerInteractionService,
+    hissModule: HissModule,
     minecartInteraction: MinecartInteractionService,
     ridingManager: RidingManager,
     jumpModule: JumpModule,
     useItemModule: UseItemModule,
+    placeModule: PlaceModule,
+    lookModule: LookModule,
     loopCmd: LoopCmd,
+    timerModule: TimerModule,
     db: DatabaseSync,
     containerRegistry: ContainerRegistry,
     inventoryActions: InventoryActions,
@@ -116,13 +114,16 @@ export default class CommandHandler {
     this.teleportService = teleportService
     this.gameApiService = gameApiService
     this.playerInteraction = playerInteraction
+    this.hissModule = hissModule
     this.minecartInteraction = minecartInteraction
     this.ridingManager = ridingManager
     this.jumpModule = jumpModule
     this.useItemModule = useItemModule
+    this.placeModule = placeModule
+    this.lookModule = lookModule
     // 破基岩放置（放置 <方块名>）启动时用"挂机同款"锁定，备注"破基岩"，并把视距固定到 8 保证追踪目标加载；
     // 停止时若锁是破基岩开的则解锁，视距回落
-    useItemModule.setOnBreakChange((active, owner) => {
+    placeModule.setOnBreakChange((active, owner) => {
       this.mcBot.setBreakViewActive(active)
       if (active) {
         if (!this.teleportService.isLocked()) {
@@ -133,23 +134,67 @@ export default class CommandHandler {
       }
     })
     this.loopCmd = loopCmd
+    this.timerModule = timerModule
     this.db = db
     this.botIndex = parseInt(process.env.BOT_INDEX || '1', 10)
     this.containerRegistry = containerRegistry
-    this.inventoryActions = inventoryActions
     this.systemBuffer = systemBuffer
     this.whitelist = whitelist
     this.standby = standby
     this.brewModule = brewModule
     this.prefix = config.prefix || '#ybot'
     this.messages = new CommandMessages(config.messages, this.prefix)
+    this.phomeCommands = new PhomeCommands(
+      teleportService,
+      this.messages,
+      this.reply.bind(this),
+      this.isPhomeAllowed.bind(this)
+    )
+    this.phomeAdminCommands = new PhomeAdminCommands(
+      db,
+      teleportService,
+      this.messages,
+      this.reply.bind(this),
+      this.isAdmin.bind(this),
+      this.isPhomeSa.bind(this)
+    )
+    this.containerCommands = new ContainerCommands(
+      mcBot,
+      containerRegistry,
+      this.messages,
+      this.isAdmin.bind(this),
+      this.reply.bind(this)
+    )
+    this.brewNodeCommands = new BrewNodeCommands(
+      mcBot,
+      inventoryActions,
+      containerRegistry,
+      brewModule,
+      this.messages,
+      this.isAdmin.bind(this),
+      this.reply.bind(this),
+      botConfig.interactionDistance,
+      botConfig.approachDistance
+    )
+    this.inventoryCommand = new InventoryCommandModule(
+      mcBot,
+      inventoryActions,
+      containerRegistry,
+      this.messages,
+      this.isAdmin.bind(this),
+      this.reply.bind(this),
+      botConfig.interactionDistance,
+      botConfig.approachDistance
+    )
+    this.timerModule.setOnDone(timer => {
+      const message = this.messages.text('timerDone', { label: timer.label, display: timer.display })
+      try { this.mcBot.whisper(timer.username, message) } catch { /* best effort */ }
+    })
     this.adminList = new Set(adminList)
     this.allowPublicCommands = config.allowPublicCommands
     this.replyAlwaysWhisper = config.replyAlwaysWhisper
-    this.replyDelayMs = botConfig.replyDelayMs
     this.forwardWaitMs = botConfig.forwardWaitMs
     this.interactionDistance = botConfig.interactionDistance
-    this.approachDistance = botConfig.approachDistance
   }
 
   getCommandMessages (): CommandMessages {
@@ -182,12 +227,7 @@ export default class CommandHandler {
     return row !== undefined
   }
 
-  getBotIndex(): number { return this.botIndex }
-
   private tpaNotes = new Map<string, string>()
-
-  /** 定时 <标签> <时长>：到点私信提醒，不锁定 bot（键 = 玩家名::标签小写） */
-  private timers = new Map<string, TimerEntry>()
 
   /**
    * 标记认领已结束（成功/被拒/超时）：不删行，而是置 resolved=1 并保留宽限期，
@@ -341,8 +381,9 @@ export default class CommandHandler {
       return
     }
     const maxLen = 240
+    const whisper = this.useWhisperReply(source)
     if (text.length <= maxLen) {
-      const ok = this.mcBot.whisper(username, text)
+      const ok = whisper ? this.mcBot.whisper(username, text) : this.mcBot.chat(text)
       if (!ok) {
         warn(`[Command] 回复失败 -> ${username}: ${text}`)
       }
@@ -360,19 +401,9 @@ export default class CommandHandler {
       remaining = remaining.slice(cut).trim()
     }
     for (const chunk of chunks) {
-      const ok = this.mcBot.whisper(username, chunk)
+      const ok = whisper ? this.mcBot.whisper(username, chunk) : this.mcBot.chat(chunk)
       if (!ok) warn(`[Command] 回复失败 -> ${username}: ${chunk}`)
     }
-  }
-
-  private waypointHint (): string {
-    const aliases = this.teleportService.listWaypointAliases()
-    return aliases.length > 0 ? aliases.join(', ') : '无'
-  }
-
-  private async notifyLocked (username: string, source: CommandSource): Promise<void> {
-    const lockedBy = this.teleportService.getLockedBy() || '未知'
-    await this.reply(username, this.messages.text('lockedBlocked', { lockedBy }), source)
   }
 
   // Commands that are whisper-only (not allowed in public chat)
@@ -393,14 +424,26 @@ export default class CommandHandler {
 
     const text = normalizeInput(message)
     if (!text) return
-    const isPhomeNum = /^%?\d+$/.test(text)
-    if (source !== 'console' && !isPhomeNum && !this.isWhitelisted(username) && !this.isAdmin(username) && !this.isBrewAllowed(username)) return
+    // Numbered phome commands use the configured public prefix (for example !1).
+    // Plain numbers are still accepted for whisper/console input.
+    const phomeText = text.startsWith(this.prefix) ? text.slice(this.prefix.length).trim() : text
+    const isPhomeNum = /^\d+$/.test(phomeText)
+    const requestedText = source === 'console' && text.startsWith(this.prefix)
+      ? text.slice(this.prefix.length).trim()
+      : text
+    const requestedCommand = source === 'chat' && matchesPrefix(text, this.prefix)
+      ? (parsePrefixedArgs(text, this.prefix)[0]?.toLowerCase() || '')
+      : (requestedText.split(/\s+/)[0]?.toLowerCase() || '')
+    const isPhomeCommand = isPhomeNum || requestedCommand === 'phome'
+    // sp 是紧急停止指令，所有未被拉黑的玩家都可以使用。
+    const isHissStop = requestedCommand === 'sp'
+    if (source !== 'console' && !isHissStop && !isPhomeCommand && !this.isWhitelisted(username) && !this.isAdmin(username) && !this.isBrewAllowed(username)) return
     // [DEBUG handle] — enable with VERBOSE=true
 
     // Lock check: only locked player and admins can control bot
-    if (this.teleportService.isLocked() && !isPhomeNum) {
-      const cmd = text.split(/\s+/)[0]?.toLowerCase() || ''
-      const allowedCmds = ['状态', '状态2', '状态3', 'status', 'status2', 'status3', '挂机', '0', '跳跃', 'xjump', '改锁定']
+    if (this.teleportService.isLocked() && !isPhomeCommand) {
+      const cmd = requestedCommand
+      const allowedCmds = ['状态', '状态2', '状态3', 'status', 'status2', 'status3', '挂机', '0', '跳跃', 'xjump', '改锁定', 'sp']
       if (username !== this.teleportService.getLockedBy() && !this.isAdmin(username) && !allowedCmds.includes(cmd)) {
         if (cmd === '解锁' || cmd === 'unlock') {
           await this.reply(username, this.messages.text('lockedCannotUnlock', { lockedBy: this.teleportService.getLockedBy() || '未知' }), source)
@@ -456,17 +499,22 @@ export default class CommandHandler {
 
     // 酿酒期间仅放行 brew/status/help，避免打断流水线。
     if (this.brewModule.isRunning()) {
-      const brewAllowed = new Set(['brew', '酿酒', 'status', '状态', '状态2', '状态3', 'help', '帮助', '定时'])
+      const brewAllowed = new Set(['brew', '酿酒', 'status', '状态', '状态2', '状态3', 'help', '帮助', '定时', 'sp'])
       if (!brewAllowed.has(cmd)) {
-        const numMatch = cmd.match(/^%?(\d+)$/)
-        if (numMatch) {
-          const num = parseInt(numMatch[1], 10)
-          // 被锁定的 bot（如陈化锁定）不拦截 phome 数字命令，放行给 _phomeNumber 走委托/锁定流程；
+        const numMatch = cmd.match(/^(\d+)$/)
+        if (numMatch || cmd === 'phome') {
+          const num = numMatch ? parseInt(numMatch[1], 10) : -1
+          // 被锁定的 bot（如陈化锁定）不拦截 phome 数字命令，放行给 phome 模块走委托/锁定流程；
           // 未锁定的活跃酿酒才拦截：只有归属 bot（或主 bot 的列表）回复"酿酒中"，delegate/无关 bot 保持静默
           if (!this.teleportService.isLocked()) {
-            const shouldReply = num === 0
-              ? this.teleportService.isMainBot()
-              : this.teleportService.isOwned(num - 1)
+            const aliasIndex = cmd === 'phome'
+              ? this.teleportService.listWaypoints().findIndex(waypoint => waypoint.alias === parts.join(' ').trim())
+              : -1
+            const shouldReply = cmd === 'phome'
+              ? aliasIndex >= 0 && this.teleportService.isOwned(aliasIndex)
+              : num === 0
+                ? this.teleportService.isMainBot()
+                : this.teleportService.isOwned(num - 1)
             if (shouldReply) {
               await this.reply(username, 'bot 正在酿酒，请稍后（brew status 可查看进度）', source)
             }
@@ -504,6 +552,19 @@ export default class CommandHandler {
       // === Combat ===
       case 'attack':
         await this._attack(username, parts[0], source)
+        break
+      case '哈气':
+        await this._hiss(username, parts[0], source)
+        break
+      case '对':
+        if (parts.length >= 2 && parts[1] === '哈气') {
+          await this._hiss(username, parts[0], source)
+        } else {
+          await this.reply(username, this.messages.text('hissUsage'), source)
+        }
+        break
+      case 'sp':
+        await this._stopHiss(username, source)
         break
 
       // === Lock ===
@@ -544,37 +605,37 @@ export default class CommandHandler {
       // === Phome Whitelist ===
       case '加phome白名单':
       case '加phome 白名单':
-        await this._phomeWlAdd(username, parts[0], source)
+        await this.phomeAdminCommands.whitelistAdd(username, parts[0], source)
         break
       case '移除phome白名单':
       case '移除phome 白名单':
-        await this._phomeWlRemove(username, parts[0], source)
+        await this.phomeAdminCommands.whitelistRemove(username, parts[0], source)
         break
       case 'phome白名单列表':
       case 'phome 白名单列表':
-        await this._phomeWlListCmd(username, source)
+        await this.phomeAdminCommands.whitelistList(username, source)
         break
 
       // === Phome SuperAdmin ===
       case '加phome超管':
       case '加phome 超管':
-        await this._phomeSaAdd(username, parts[0], source)
+        await this.phomeAdminCommands.superAdminAdd(username, parts[0], source)
         break
       case '移除phome超管':
       case '移除phome 超管':
-        await this._phomeSaRemove(username, parts[0], source)
+        await this.phomeAdminCommands.superAdminRemove(username, parts[0], source)
         break
       case 'phome超管列表':
       case 'phome 超管列表':
-        await this._phomeSaList(username, source)
+        await this.phomeAdminCommands.superAdminList(username, source)
         break
 
       // === Phome Points ===
       case '加phome点':
-        await this._phomePointAdd(username, parts, source)
+        await this.phomeAdminCommands.pointAdd(username, parts, source)
         break
       case '移除phome点':
-        await this._phomePointRemove(username, parts[0], source)
+        await this.phomeAdminCommands.pointRemove(username, parts[0], source)
         break
 
       // === Blacklist ===
@@ -595,22 +656,22 @@ export default class CommandHandler {
 
       // === Inventory ===
       case 'inv':
-        await this._inv(username, source)
+        await this.inventoryCommand.inventory(username, source)
         break
       case 'store':
-        await this._store(username, parts, source)
+        await this.inventoryCommand.store(username, parts, source)
         break
       case 'take':
-        await this._take(username, parts, source)
+        await this.inventoryCommand.take(username, parts, source)
         break
       case '丢弃':
-        await this._drop(username, parts, source)
+        await this.inventoryCommand.drop(username, parts, source)
         break
       case '丢弃全部':
-        await this._dropAll(username, source)
+        await this.inventoryCommand.dropAll(username, source)
         break
       case '手持':
-        await this._hold(username, parts.join(' '), source)
+        await this.inventoryCommand.hold(username, parts.join(' '), source)
         break
 
       // === Item Actions ===
@@ -666,13 +727,13 @@ export default class CommandHandler {
       // === Reload (terminal only) ===
       case '重载':
       case 'reload':
-        await this._reloadBot(source)
+        await reloadBot(source, this.reply.bind(this))
         break
 
       // === Interaction ===
       // === Container ===
       case 'container':
-        await this._container(username, parts, source)
+        await this.containerCommands.handle(username, parts, source)
         break
 
       // === Brew ===
@@ -688,7 +749,7 @@ export default class CommandHandler {
 
       // === Brew Node (方块登记) ===
       case 'node':
-        await this._nodeCmd(username, parts, source)
+        await this.brewNodeCommands.handle(username, parts, source)
         break
 
       // === Say/Forward (admin) ===
@@ -701,103 +762,26 @@ export default class CommandHandler {
 
 
       // === Numbered Phome ===
+      case 'phome':
+        if (parts.length === 0) {
+          await this.reply(username, this.messages.text('phomeUsage', {
+            waypoints: this.teleportService.getPhomeListText()
+          }), source)
+        } else {
+          await this.phomeCommands.handleAlias(username, parts.join(' '), source)
+        }
+        break
       default:
-        const numMatch = cmd.match(/^%?(\d+)$/)
+        const numMatch = cmd.match(/^(\d+)$/)
         if (numMatch) {
           const num = parseInt(numMatch[1], 10)
-          if (num === 0) { await this._phomeList(username, source) } else { await this._phomeNumber(username, num, source) }
+          await this.phomeCommands.handleNumber(username, num, source)
           break
         }
         await this.reply(username, this.messages.text('unknownCommand', { cmd }), source)
     }
 
     this.standby.scheduleAfk()
-  }
-
-  private async _phomeList (username: string, source: CommandSource): Promise<void> {
-    // 只有主 bot 响应传送点列表；其他 bot 私聊 0 时提醒并指向主 bot，公屏 %0 保持静默（主 bot 已应答）
-    if (this.teleportService.isMainBot() || source === 'console') {
-      await this.reply(username, this.teleportService.getPhomeListText(), source)
-      return
-    }
-    if (source === 'whisper') {
-      await this.reply(username, this.messages.text('phomeRedirect', { mainBot: this.teleportService.getMainBot() }), source)
-    }
-  }
-
-  private async _phomeNumber (username: string, num: number, source: CommandSource): Promise<void> {
-    const idx = num - 1
-    const wp = this.teleportService.getWaypointByIndex(idx)
-    if (!wp) return
-    const delegatable = this.teleportService.isDelegatable(idx)
-
-    if (this.teleportService.isOwned(idx)) {
-      // === Owner 路径 ===
-      if (this.teleportService.isLocked()) {
-        // /phome 点 + 公屏 %N：owner 静默，交由同镇 bot 代执行
-        if (delegatable && source === 'chat') {
-          if (!this.isPhomeAllowed(username)) {
-            await this.reply(username, this.messages.text('latelanOnly'), source)
-            return
-          }
-          // 同镇无任何可用的 delegate（全部被锁/离线/无同镇 bot）→ 立即报繁忙，带锁定人信息
-          if (!this.teleportService.hasDelegateCandidates(idx)) {
-            await this.reply(username, this.messages.text('phomeBusyNoCandidates', {
-              owner: this.teleportService.getBotName(),
-              lockedBy: this.teleportService.getLockedBy() ?? '未知'
-            }), source)
-            return
-          }
-          this.schedulePhomeDelegateFallback(username, idx, source)
-          return
-        }
-        // /home 点（仅本人，不可委托）或私聊请求：不委托，直接告知被锁（/ts 点小镇共享，已在上方走委托路径）
-        const lockedBy = this.teleportService.getLockedBy()
-        const secs = this.teleportService.getLockedTicks() / 20
-        const m = Math.floor(secs / 60)
-        const s = Math.floor(secs % 60)
-        await this.reply(username, this.messages.text('lockedForTime', { lockedBy: lockedBy ?? '未知', time: `${m}分${s}秒` }), source)
-        return
-      }
-      if (this.teleportService.isCommandBusy()) {
-        await this.reply(username, this.messages.text('teleportFailed'), source)
-        return
-      }
-      if (!this.isPhomeAllowed(username)) {
-        await this.reply(username, this.messages.text('latelanOnly'), source)
-        return
-      }
-
-      const result = await this.teleportService.executePhome(username, idx)
-      if (!result.success && result.message) {
-        await this.reply(username, result.message, source)
-      }
-      return
-    }
-
-    // === Delegate 路径：仅公屏 %N；同镇点 + owner 被锁 + 本 bot 空闲未锁 + 玩家有权限才代执行 ===
-    if (delegatable && source === 'chat' && this.isPhomeAllowed(username) && this.teleportService.canDelegateFor(idx)) {
-      const owner = this.teleportService.ownerOf(idx)
-      if (this.teleportService.claimPhomeDelegate(username, idx)) {
-        const result = await this.teleportService.executePhomeDelegated(username, idx)
-        if (result.success) {
-          await this.reply(username, this.messages.text('phomeDelegated', { owner: owner ?? '同镇bot', alias: wp.alias }), source)
-        } else {
-          // 执行失败（极罕见）→ 释放认领，让 owner 兜底仲裁接管
-          this.teleportService.releasePhomeClaim(username, idx)
-        }
-      }
-    }
-    // 其他情况（非本镇点 / owner 未锁定 / 认领失败 / 无权限）：保持静默
-  }
-
-  /** 锁定的 owner 静默后，等待同镇 delegate 认领；超时无认领则回复「捷运繁忙」 */
-  private schedulePhomeDelegateFallback (username: string, idx: number, source: CommandSource): void {
-    const scheduledAt = Date.now()
-    setTimeout(() => {
-      if (this.teleportService.isDelegateClaimed(username, idx, scheduledAt)) return
-      this.reply(username, this.messages.text('phomeBusyTimeout'), source).catch(() => {})
-    }, CommandHandler.PHOME_DELEGATE_FALLBACK_MS)
   }
 
   private latelanMembers = new Set<string>()
@@ -844,6 +828,10 @@ export default class CommandHandler {
   private async _mount (username: string, target: string | undefined, source: CommandSource): Promise<void> {
     const bot = this.mcBot.bot
     if (!bot) return
+    if (this.hissModule.isActive()) {
+      await this.reply(username, 'bot \u6b63\u5728\u54c8\u6c14\u8ffd\u51fb\uff0c\u8bf7\u5148\u4f7f\u7528 sp \u505c\u6b62\u54c8\u6c14\u3002', source)
+      return
+    }
     const targetName = target?.trim() || username
 
     // Find player entity
@@ -852,7 +840,7 @@ export default class CommandHandler {
       for (const [, e] of Object.entries(bot.entities)) {
         if (e?.type !== 'player' || e === bot.entity || (e as { username?: string }).username === bot.username) continue
         const dist = bot.entity.position.distanceTo(e.position)
-        if (dist > 5) continue
+        if (dist > 32) continue
         if ((e as { username?: string }).username?.toLowerCase() === targetName.toLowerCase()) { entity = e; break }
       }
     }
@@ -864,8 +852,8 @@ export default class CommandHandler {
         await sleep(300)
       }
 
-      // Walk to player (within 5 blocks)
-      const approach = await approachEntity(bot, entity, this.interactionDistance, 5)
+      // Walk to a loaded player within the remount seek range.
+      const approach = await approachEntity(bot, entity, this.interactionDistance, 32)
       if (!approach.success) {
         await this.reply(username, this.messages.text('cannotApproach', { target: targetName, message: approach.message || '' }), source)
         return
@@ -882,7 +870,7 @@ export default class CommandHandler {
       await sleep(800)
       if (isMountedOnPlayer(bot, targetName)) {
         await this.reply(username, this.messages.text('mounted', { target: targetName }), source)
-        this.mcBot.chat('/afk')
+        this.mcBot.sendAfk()
       } else {
         this.ridingManager.clearMode()
         await this.reply(username, this.messages.text('mountFailed'), source)
@@ -894,6 +882,10 @@ export default class CommandHandler {
   }
 
   private async _cart (username: string, source: CommandSource): Promise<void> {
+    if (this.hissModule.isActive()) {
+      await this.reply(username, 'bot \u6b63\u5728\u54c8\u6c14\u8ffd\u51fb\uff0c\u8bf7\u5148\u4f7f\u7528 sp \u505c\u6b62\u54c8\u6c14\u3002', source)
+      return
+    }
     const ridingTarget = this.ridingManager.getTargetPlayer()
     if (
       this.ridingManager.getMode() === 'player' &&
@@ -942,134 +934,94 @@ export default class CommandHandler {
       : this.messages.text('attackError', { message: result.message || '攻击失败' }), source)
   }
 
-  private async _container (
-    username: string,
-    parts: string[],
-    source: CommandSource
-  ): Promise<void> {
-    const sub = (parts.shift() || '').toLowerCase()
-    switch (sub) {
-      case 'add':
-        await this._containerAdd(username, parts[0], source)
-        break
-      case 'remove':
-        await this._containerRemove(username, parts[0], source)
-        break
-      case 'list':
-        await this._containerList(username, source)
-        break
-      case 'info':
-        await this._containerInfo(username, parts[0], source)
-        break
-      default:
-        await this.reply(username, [
-          this.messages.text('containerAddUsage'),
-          this.messages.text('containerRemoveUsage'),
-          this.messages.text('containerInfoUsage'),
-          'container list — 列出容器'
-        ].join('\n'), source)
-    }
-  }
-
-  private async _containerAdd (username: string, alias: string | undefined, source: CommandSource): Promise<void> {
+  private async _hiss (username: string, target: string | undefined, source: CommandSource): Promise<void> {
     if (!this.isAdmin(username)) {
       await this.reply(username, this.messages.text('noPermission'), source)
       return
     }
-    if (!alias) {
-      await this.reply(username, this.messages.text('containerAddUsage'), source)
+
+    if (this.ridingManager.isActive()) {
+      await this.reply(username, 'bot \u5f53\u524d\u6b63\u5728\u9a91\u4e58\uff0c\u8bf7\u5148\u4e0b\u8f66\u540e\u518d\u54c8\u6c14\u3002', source)
+      return
+    }
+    if (this.jumpModule.isActive()) {
+      await this.reply(username, 'bot \u5f53\u524d\u6b63\u5728\u8df3\u8dc3\uff0c\u8bf7\u5148\u505c\u6b62\u8df3\u8dc3\u540e\u518d\u54c8\u6c14\u3002', source)
+      return
+    }
+    if (this.placeModule.isActive()) {
+      await this.reply(username, 'bot \u5f53\u524d\u6b63\u5728\u653e\u7f6e\uff0c\u8bf7\u5148\u505c\u6b62\u653e\u7f6e\u540e\u518d\u54c8\u6c14\u3002', source)
+      return
+    }
+    if (this.useItemModule.isActive()) {
+      await this.reply(username, 'bot \u5f53\u524d\u6b63\u5728\u4f7f\u7528\u7269\u54c1\uff0c\u8bf7\u5148\u6267\u884c \u4f7f\u7528 \u505c\u6b62\u540e\u518d\u54c8\u6c14\u3002', source)
       return
     }
 
-    const bot = this.mcBot.bot
-    if (!bot) {
-      await this.reply(username, this.messages.text('containerNoTarget'), source)
+    const targetName = target?.trim()
+    if (!targetName) {
+      await this.reply(username, this.messages.text('hissUsage'), source)
+      return
+    }
+    if (targetName === this.mcBot.bot?.username) {
+      await this.reply(username, '不能对 bot 自己哈气。', source)
+      return
+    }
+    if (this.teleportService.isLocked() && this.teleportService.getLockedNote() !== '哈气') {
+      await this.reply(username, 'bot 当前被其他任务锁定，无法开始哈气。', source)
       return
     }
 
-    const target = getTargetContainerBlock(bot)
-    if (!target) {
-      await this.reply(username, this.messages.text('containerNoTarget'), source)
-      return
-    }
-
-    const pos = target.block.position
-    this.containerRegistry.add({
-      alias,
-      type: target.type,
-      x: pos.x,
-      y: pos.y,
-      z: pos.z,
-      dimension: bot.game?.dimension || 'overworld',
-      addedBy: username
+    // 目标会在 bot 开始移动前收到警告，可由任何玩家用 sp 随时终止。
+    this.mcBot.whisper(targetName, this.messages.text('hissWarn', { owner: username }))
+    const result = await this.hissModule.start(targetName, (stoppedTarget, reason) => {
+      this.onHissStopped(username, stoppedTarget, reason)
     })
+    if (!result.success) {
+      await this.reply(username, `哈气启动失败: ${result.message || '未知错误'}`, source)
+      return
+    }
 
-    await this.reply(username, this.messages.text('containerAddSuccess', {
-      alias,
-      type: target.type,
-      x: pos.x,
-      y: pos.y,
-      z: pos.z
-    }), source)
+    this.teleportService.lock(username, '哈气')
+    await this.reply(username, this.messages.text('hissStarted', { target: targetName }), source)
   }
 
-  private async _containerRemove (username: string, alias: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) {
-      await this.reply(username, this.messages.text('noPermission'), source)
+  private async _stopHiss (username: string, source: CommandSource): Promise<void> {
+    const targetName = this.hissModule.stop()
+    if (!targetName) {
+      // A process restart cannot resume the in-memory hiss task, but its
+      // persistent teleport lock may still exist. Let sp repair that stale
+      // state instead of incorrectly reporting that nothing can be stopped.
+      if (this.teleportService.getLockedNote() === '哈气') {
+        this.teleportService.unlock()
+        await this.reply(username, this.messages.text('hissStaleCleared'), source)
+        return
+      }
+      await this.reply(username, this.messages.text('hissNotActive'), source)
       return
     }
-    if (!alias) {
-      await this.reply(username, this.messages.text('containerRemoveUsage'), source)
-      return
-    }
-    if (!this.containerRegistry.remove(alias)) {
-      await this.reply(username, this.messages.text('containerRemoveNotFound', { alias }), source)
-      return
-    }
-    await this.reply(username, this.messages.text('containerRemoveSuccess', { alias }), source)
+    this.mcBot.whisper(targetName, '哈气追击已停止。')
+    await this.reply(username, this.messages.text('hissStopped', { target: targetName }), source)
   }
 
-  private async _containerList (username: string, source: CommandSource): Promise<void> {
-    const list = this.containerRegistry.list()
-    if (list.length === 0) {
-      await this.reply(username, this.messages.text('containerListEmpty'), source)
-      return
-    }
+  private onHissStopped (
+    owner: string,
+    targetName: string,
+    reason: 'stopped' | 'target_lost' | 'bot_unavailable' | 'replaced' | 'riding' | 'error'
+  ): void {
+    if (this.teleportService.getLockedNote() === '哈气') this.teleportService.unlock()
+    if (reason === 'stopped') return
 
-    const lines = [
-      this.messages.text('containerListHeader', { count: list.length }),
-      ...list.map(c => this.messages.text('containerListEntry', {
-        alias: c.alias,
-        type: c.type,
-        x: c.x,
-        y: c.y,
-        z: c.z
-      }))
-    ]
-    await this.reply(username, lines.join('\n'), source)
-  }
-
-  private async _containerInfo (username: string, alias: string | undefined, source: CommandSource): Promise<void> {
-    if (!alias) {
-      await this.reply(username, this.messages.text('containerInfoUsage'), source)
-      return
+    const reasonText: Record<Exclude<typeof reason, 'stopped'>, string> = {
+      target_lost: '目标离线或离开视距超过 15 秒',
+      bot_unavailable: '机器人已断开',
+      replaced: '被新的哈气目标替换',
+      riding: '\u54c8\u6c14\u8ffd\u51fb\u65f6\u8fdb\u5165\u9a91\u4e58\u72b6\u6001',
+      error: '追击发生异常'
     }
-    const info = this.containerRegistry.get(alias)
-    if (!info) {
-      await this.reply(username, this.messages.text('containerInfoNotFound', { alias }), source)
-      return
-    }
-    const lines = this.messages.lines('containerInfoLines', {
-      alias: info.alias,
-      type: info.type,
-      x: info.x,
-      y: info.y,
-      z: info.z,
-      dimension: info.dimension,
-      addedBy: info.addedBy,
-      date: info.addedAt.slice(0, 10)
-    })
-    await this.reply(username, lines.join('\n'), source)
+    this.mcBot.whisper(owner, this.messages.text('hissEnded', {
+      target: targetName,
+      reason: reasonText[reason]
+    }))
   }
 
   private async _brew (username: string, parts: string[], source: CommandSource): Promise<void> {
@@ -1098,8 +1050,10 @@ export default class CommandHandler {
           return
         }
         // bot 离酒庄较远时先 tpa 到发起者，到达后再开酿
-        const relocated = await this._relocateForBrew(username, source)
-        if (!relocated) return
+        if (!this.brewModule.isRunning()) {
+          const relocated = await this._relocateForBrew(username, source)
+          if (!relocated) return
+        }
         const result = await this.brewModule.start(
           recipe,
           async message => this.reply(username, message, source),
@@ -1108,10 +1062,42 @@ export default class CommandHandler {
         await this.reply(
           username,
           result.success
-            ? this.messages.text('brewStarted', { recipe })
+            ? result.queued ? result.message || '已加入酿酒队列' : this.messages.text('brewStarted', { recipe })
             : result.message || this.messages.text('brewBusy'),
           source
         )
+        break
+      }
+
+      case 'queue':
+      case '队列': {
+        const action = (parts.shift() || '').toLowerCase()
+        if (action === 'clear' || action === '清空') {
+          const count = this.brewModule.clearQueue()
+          await this.reply(username, count > 0 ? `已清空 ${count} 个酿酒队列任务` : '酿酒队列为空', source)
+          break
+        }
+        if (action === 'delete' || action === 'remove' || action === '删除' || action === '移除') {
+          const position = Number(parts.shift())
+          const result = this.brewModule.removeQueueItem(position)
+          await this.reply(username, result.message || '删除队列失败', source)
+          break
+        }
+        if (!action) {
+          const queue = this.brewModule.status().queue || []
+          await this.reply(username, queue.length > 0 ? queue.join('\n') : '酿酒队列为空', source)
+          break
+        }
+        if (!this.brewModule.isRunning()) {
+          const relocated = await this._relocateForBrew(username, source)
+          if (!relocated) return
+        }
+        const result = await this.brewModule.start(
+          action,
+          async message => this.reply(username, message, source),
+          username
+        )
+        await this.reply(username, result.message || (result.success ? '已加入酿酒队列' : this.messages.text('brewBusy')), source)
         break
       }
 
@@ -1119,11 +1105,13 @@ export default class CommandHandler {
       case '状态': {
         const status = this.brewModule.status()
         const agingLines = status.aging ?? []
+        const queueLines = status.queue ?? []
         if (!status.running) {
-          if (agingLines.length > 0) {
+          if (agingLines.length > 0 || queueLines.length > 0) {
             await this.reply(username, [
               this.messages.text('brewStatusIdle'),
-              ...agingLines
+              ...agingLines,
+              ...queueLines
             ].join('\n'), source)
             return
           }
@@ -1137,7 +1125,8 @@ export default class CommandHandler {
             phase: phaseText,
             status: status.detail || phaseText
           }),
-          ...agingLines
+          ...agingLines,
+          ...queueLines
         ]
         await this.reply(username, lines.join('\n'), source)
         break
@@ -1151,6 +1140,26 @@ export default class CommandHandler {
         }
         const result = this.brewModule.reloadRecipes()
         await this.reply(username, result.message || '重新加载配方失败', source)
+        break
+      }
+
+      case 'aging-stop':
+      case '陈化停止':
+      case '停止陈化': {
+        const rawPosition = parts.shift()
+        const position = rawPosition === undefined ? undefined : Number(rawPosition)
+        const result = await this.brewModule.stopAging(position)
+        if (result.invalidPosition) {
+          await this.reply(username, this.messages.text('brewAgingStopNotFound', { position: rawPosition || '-' }), source)
+          break
+        }
+        await this.reply(
+          username,
+          result.stopped > 0
+            ? this.messages.text('brewAgingStopped', { count: result.stopped })
+            : this.messages.text('brewAgingIdle'),
+          source
+        )
         break
       }
 
@@ -1215,223 +1224,6 @@ export default class CommandHandler {
       await this.reply(username, '传送未到达酒庄附近，酿酒流程可能因距离过远失败', source)
     }
     return true
-  }
-
-  private async _nodeCmd (username: string, parts: string[], source: CommandSource): Promise<void> {
-    const sub = (parts.shift() || '').toLowerCase()
-
-    switch (sub) {
-      case 'reg':
-      case '登记':
-      case '注册':
-        await this._nodeReg(username, parts, source)
-        break
-      case 'list':
-      case '列表':
-        await this._nodeList(username, parts, source)
-        break
-      case 'info':
-      case '详情':
-        await this._nodeInfo(username, parts[0], source)
-        break
-      case 'remove':
-      case '删除':
-        await this._nodeRemove(username, parts[0], source)
-        break
-      default:
-        await this.reply(username, [
-          '用法: node 登记 <别名> <x> <y> <z> [-混合] [-区域 区域]',
-          '      node 列表 [区域]',
-          '      node 详情 <别名>',
-          '      node 删除 <别名>'
-        ].join('\n'), source)
-    }
-  }
-
-  private async _nodeReg (username: string, parts: string[], source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) {
-      await this.reply(username, this.messages.text('noPermission'), source)
-      return
-    }
-
-    const [alias, xRaw, yRaw, zRaw, ...options] = parts
-    if (
-      !alias ||
-      !/^-?\d+$/.test(xRaw ?? '') ||
-      !/^-?\d+$/.test(yRaw ?? '') ||
-      !/^-?\d+$/.test(zRaw ?? '')
-    ) {
-      await this.reply(username, this.messages.text('nodeAddUsage'), source)
-      return
-    }
-
-    let mixed = false
-    let group: string | undefined
-    for (let i = 0; i < options.length; i++) {
-      const opt = options[i].toLowerCase()
-      if (opt === '-m' || opt === '-mixed' || opt === '-混合') {
-        mixed = true
-      } else if (opt === '-g' || opt === '-group' || opt === '--group' || opt === '-区域') {
-        group = options[++i]
-        if (!group) {
-          await this.reply(username, this.messages.text('nodeAddUsage'), source)
-          return
-        }
-      } else {
-        await this.reply(username, this.messages.text('nodeAddUsage'), source)
-        return
-      }
-    }
-
-    const bot = this.mcBot.bot
-    if (!bot) {
-      await this.reply(username, this.messages.text('botNotReady'), source)
-      return
-    }
-
-    const x = Number(xRaw)
-    const y = Number(yRaw)
-    const z = Number(zRaw)
-    const target = getNodeBlockAt(bot, x, y, z)
-    if (!target) {
-      await this.reply(username, this.messages.text('nodeAddNoTarget'), source)
-      return
-    }
-
-    const blockType = target.blockType
-    if (blockType !== 'Container' && mixed) {
-      await this.reply(username, this.messages.text('nodeAddUsage'), source)
-      return
-    }
-
-    const resolvedGroup = (group ?? this.brewModule.getGroup()).trim()
-
-    let isDedicated: boolean | null = null
-    let itemId: string | null = null
-    if (blockType === 'Container') {
-      isDedicated = !mixed
-      if (isDedicated) {
-        try {
-          const approach = await this.inventoryActions.approachBlock(
-            x,
-            y,
-            z,
-            this.interactionDistance,
-            this.approachDistance
-          )
-          if (!approach.success) {
-            await this.reply(username, approach.message || '无法接近容器', source)
-            return
-          }
-          const chest = await bot.openContainer(target.block)
-          try {
-            const first = chest.slots[0]
-            if (!first) {
-              await this.reply(username, '专用容器第一格没有物品，无法绑定', source)
-              return
-            }
-            itemId = normalizeItemKey(first.name)
-          } finally {
-            chest.close()
-          }
-        } catch (err) {
-          await this.reply(username, `登记容器失败: ${(err as Error).message}`, source)
-          return
-        }
-      }
-    }
-
-    this.containerRegistry.add({
-      alias,
-      type: target.block.name,
-      blockType,
-      x,
-      y,
-      z,
-      dimension: bot.game?.dimension || 'overworld',
-      isDedicated,
-      itemId,
-      nodeGroup: resolvedGroup,
-      addedBy: username
-    })
-
-    const bindText = blockType === 'Container'
-      ? (itemId ? ` | 绑定 ${cnName(itemId)}` : (mixed ? '' : ' | 空容器'))
-      : ''
-    await this.reply(username, this.messages.text('nodeAddSuccess', {
-      alias,
-      type: blockType,
-      group: resolvedGroup,
-      bind: bindText,
-      x,
-      y,
-      z
-    }), source)
-  }
-
-  private async _nodeList (username: string, parts: string[], source: CommandSource): Promise<void> {
-    const groupArg = (parts[0] ?? '').trim()
-    const group = groupArg || this.brewModule.getGroup()
-    const list = this.containerRegistry.list(group)
-    if (list.length === 0) {
-      await this.reply(username, this.messages.text('nodeListEmpty', { group }), source)
-      return
-    }
-
-    const lines = [
-      this.messages.text('nodeListHeader', { count: list.length, group }),
-      ...list.map(n => this.messages.text('nodeListEntry', {
-        alias: n.alias,
-        type: n.blockType ?? n.type,
-        x: n.x,
-        y: n.y,
-        z: n.z,
-        item: n.itemId ? ` [${cnName(n.itemId)}]` : ''
-      }))
-    ]
-    await this.reply(username, lines.join('\n'), source)
-  }
-
-  private async _nodeInfo (username: string, alias: string | undefined, source: CommandSource): Promise<void> {
-    if (!alias) {
-      await this.reply(username, this.messages.text('nodeInfoUsage'), source)
-      return
-    }
-    const info = this.containerRegistry.get(alias)
-    if (!info) {
-      await this.reply(username, this.messages.text('nodeInfoNotFound', { alias }), source)
-      return
-    }
-    const lines = this.messages.lines('nodeInfoLines', {
-      alias: info.alias,
-      type: info.blockType ?? info.type,
-      block: info.type,
-      x: info.x,
-      y: info.y,
-      z: info.z,
-      dimension: info.dimension,
-      group: info.nodeGroup || '-',
-      item: info.itemId ? cnName(info.itemId) : '-',
-      addedBy: info.addedBy,
-      date: info.addedAt.slice(0, 10)
-    })
-    await this.reply(username, lines.join('\n'), source)
-  }
-
-  private async _nodeRemove (username: string, alias: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) {
-      await this.reply(username, this.messages.text('noPermission'), source)
-      return
-    }
-    if (!alias) {
-      await this.reply(username, this.messages.text('nodeRemoveUsage'), source)
-      return
-    }
-    if (!this.containerRegistry.remove(alias)) {
-      await this.reply(username, this.messages.text('nodeRemoveNotFound', { alias }), source)
-      return
-    }
-    await this.reply(username, this.messages.text('nodeRemoveSuccess', { alias }), source)
   }
 
   private async _lock (username: string, source: CommandSource, arg?: string): Promise<void> {
@@ -1551,129 +1343,17 @@ export default class CommandHandler {
     await this.reply(username, msg, source)
   }
 
-  private async _inv (username: string, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) {
-      await this.reply(username, this.messages.text('noPermission'), source)
-      return
-    }
-
-    const result = this.inventoryActions.listInventory()
-    if (!result.success) {
-      await this.reply(username, this.messages.text('invError', { message: result.message || '失败' }), source)
-      return
-    }
-
-    if (!result.lines?.length) {
-      await this.reply(username, this.messages.text('invEmpty'), source)
-      return
-    }
-
-    const header = this.messages.text('invHeader', { count: result.lines.length })
-    await this.reply(username, [header, ...result.lines].join('\n'), source)
-  }
-
-  private async _store (username: string, parts: string[], source: CommandSource): Promise<void> {
-    const alias = parts[0]
-    const itemQuery = parts[1]
-    const count = parts[2] ? parseInt(parts[2], 10) : undefined
-
-    if (!alias || !itemQuery) {
-      await this.reply(username, this.messages.text('storeUsage'), source)
-      return
-    }
-
-    const record = this.containerRegistry.get(alias)
-    if (!record) {
-      await this.reply(username, this.messages.text('containerInfoNotFound', { alias }), source)
-      return
-    }
-
-    const result = await this.inventoryActions.storeInContainer(
-      record.x,
-      record.y,
-      record.z,
-      itemQuery,
-      Number.isFinite(count) ? count : undefined,
-      this.interactionDistance,
-      this.approachDistance
-    )
-    await this.reply(username, result.success
-      ? this.messages.text('storeSuccess', { message: result.message || '已存入' })
-      : this.messages.text('storeError', { message: result.message || '存入失败' }), source)
-  }
-
-  private async _take (username: string, parts: string[], source: CommandSource): Promise<void> {
-    const alias = parts[0]
-    const itemQuery = parts[1]
-    const count = parts[2] ? parseInt(parts[2], 10) : undefined
-
-    if (!alias || !itemQuery) {
-      await this.reply(username, this.messages.text('takeUsage'), source)
-      return
-    }
-
-    const record = this.containerRegistry.get(alias)
-    if (!record) {
-      await this.reply(username, this.messages.text('containerInfoNotFound', { alias }), source)
-      return
-    }
-
-    const result = await this.inventoryActions.takeFromContainer(
-      record.x,
-      record.y,
-      record.z,
-      itemQuery,
-      Number.isFinite(count) ? count : undefined,
-      this.interactionDistance,
-      this.approachDistance
-    )
-    await this.reply(username, result.success
-      ? this.messages.text('takeSuccess', { message: result.message || '已取出' })
-      : this.messages.text('takeError', { message: result.message || '取出失败' }), source)
-  }
-
-  private async _drop (username: string, parts: string[], source: CommandSource): Promise<void> {
-    // Item display names may contain a duration (for example "抗火药水 8分钟").
-    // Only a final all-digit argument is interpreted as the optional quantity.
-    const last = parts.at(-1)
-    const count = last && /^\d+$/.test(last) ? parseInt(parts.pop() as string, 10) : undefined
-    const itemQuery = parts.join(' ')
-
-    if (!itemQuery) {
-      await this.reply(username, this.messages.text('dropUsage'), source)
-      return
-    }
-
-    const result = await this.inventoryActions.dropItem(
-      itemQuery,
-      Number.isFinite(count) ? count : undefined
-    )
-    await this.reply(username, result.success
-      ? this.messages.text('dropSuccess', { message: result.message || '已丢弃' })
-      : this.messages.text('dropError', { message: result.message || '丢弃失败' }), source)
-  }
-
-  private async _dropAll (username: string, source: CommandSource): Promise<void> {
-    const bot = this.mcBot.bot
-    if (!bot) { await this.reply(username, this.messages.text('botNotReady'), source); return }
-    const items = bot.inventory.items()
-    for (const item of items) {
-      try { await bot.tossStack(item) } catch { /* skip */ }
-    }
-    await this.reply(username, this.messages.text('dropAllSuccess', { count: items.length }), source)
-  }
-
-  private async _hold (username: string, itemName: string | undefined, source: CommandSource): Promise<void> {
-    if (!itemName) { await this.reply(username, this.messages.text('holdUsage'), source); return }
-    const bot = this.mcBot.bot
-    if (!bot) return
-    const matches = findMatchingItems(bot.inventory.items(), itemName)
-    if (matches.length === 0) { await this.reply(username, this.messages.text('holdNotFound', { item: itemName }), source); return }
-    await bot.equip(matches[0], 'hand')
-    await this.reply(username, this.messages.text('holdSuccess', { item: itemDisplayName(matches[0]) }), source)
-  }
-
   private async _useItem (username: string, args: string, source: CommandSource): Promise<void> {
+    const firstArg = args.trim().split(/\s+/)[0]?.toLowerCase() || ''
+    if (firstArg === 'stop' || firstArg === '\u505c\u6b62') {
+      await this.reply(username, this.useItemModule.stopUse(), source)
+      return
+    }
+    if (this.placeModule.isBedrockBreak()) {
+      await this.reply(username, '破基岩追踪放置进行中；请先执行 放置 停止 后再使用物品。', source)
+      return
+    }
+    this.placeModule.interrupt('开始使用物品')
     const result = this.useItemModule.startUse(args, () => {
       void this.reply(username, this.messages.text('useComplete'), source)
     }, () => {
@@ -1683,19 +1363,29 @@ export default class CommandHandler {
   }
 
   private async _placeBlock (username: string, args: string, source: CommandSource): Promise<void> {
-    await this.reply(username, this.useItemModule.startPlace(args, username), source)
+    const firstArg = args.trim().split(/\s+/)[0]?.toLowerCase() || ''
+    if (this.hissModule.isActive() && firstArg !== 'stop' && firstArg !== '\u505c\u6b62') {
+      await this.reply(username, 'bot \u6b63\u5728\u54c8\u6c14\u8ffd\u51fb\uff0c\u8bf7\u5148\u4f7f\u7528 sp \u505c\u6b62\u54c8\u6c14\u3002', source)
+      return
+    }
+    if (firstArg === 'stop' || firstArg === '\u505c\u6b62') {
+      await this.reply(username, this.placeModule.stop(), source)
+      return
+    }
+    this.useItemModule.interrupt('开始放置')
+    await this.reply(username, this.placeModule.start(args, username), source)
   }
 
   private async _lookAt (username: string, parts: string[], source: CommandSource): Promise<void> {
     if (parts.length === 2) {
       const yaw = parseFloat(parts[0]), pitch = parseFloat(parts[1])
       if (!isNaN(yaw) && !isNaN(pitch)) {
-        await this.reply(username, this.useItemModule.look(yaw, pitch), source)
+        await this.reply(username, this.lookModule.look(yaw, pitch), source)
         return
       }
     }
     if (parts.length === 1) {
-      const res = this.useItemModule.lookPlayer(parts[0])
+      const res = this.lookModule.lookPlayer(parts[0])
       if (res) { await this.reply(username, res, source); return }
       await this.reply(username, this.messages.text('lookPlayerNotFound', { player: parts[0] }), source)
       return
@@ -1715,10 +1405,15 @@ export default class CommandHandler {
       await this.reply(username, '用法: 看向 x y z', source)
       return
     }
-    await this.reply(username, await this.useItemModule.lookAtCoord(x, y, z), source)
+    await this.reply(username, await this.lookModule.lookAtCoord(x, y, z), source)
   }
 
   private async _waterFill (username: string, choice: string | undefined, source: CommandSource): Promise<void> {
+    if (this.placeModule.isBedrockBreak()) {
+      await this.reply(username, '破基岩追踪放置进行中；请先执行 放置 停止 后再装水。', source)
+      return
+    }
+    this.placeModule.interrupt('开始装水')
     const r = await this.useItemModule.fillWater(choice || '')
     const d = r.data ?? {}
     let msg: string
@@ -1730,6 +1425,7 @@ export default class CommandHandler {
         case 'no_item': msg = this.messages.text('waterNoItem'); break
         case 'equip_fail': msg = this.messages.text('waterEquipFail', { item: String(d.item ?? ''), message: r.message ?? '' }); break
         case 'too_far': msg = this.messages.text('waterTooFar', { distance: String(d.distance ?? '') }); break
+        case 'break_active': msg = r.message || '破基岩追踪放置进行中，请先执行 放置 停止'; break
         case 'not_filled': msg = this.messages.text('waterNotFilled', { item: String(d.item ?? ''), distance: String(d.distance ?? ''), version: String(d.version ?? '') }); break
         case 'unsupported': msg = this.messages.text('waterUnsupported'); break
         default: msg = this.messages.text('waterFail', { message: r.message ?? '未知原因' })
@@ -1764,92 +1460,6 @@ export default class CommandHandler {
       const chunk = names.slice(i, i + per).join(', ')
       await this.reply(username, this.messages.text('wlListPage', { page: i / per + 1, total: Math.ceil(names.length / per), chunk }), source)
     }
-  }
-
-  private async _phomeWlAdd (username: string, target: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isPhomeSa(username)) { await this.reply(username, this.messages.text('phomeSaOnly'), source); return }
-    if (!target) { await this.reply(username, this.messages.text('phomeWlAddUsage'), source); return }
-    if (this.isPhomeAllowed(target)) { await this.reply(username, this.messages.text('phomeWlAlready', { target }), source); return }
-    this.db.prepare('INSERT OR REPLACE INTO phome_whitelist (game_name, level) VALUES (?, ?)').run(target, 'wl')
-    await this.reply(username, this.messages.text('phomeWlAddSuccess', { target }), source)
-  }
-
-  private async _phomeWlRemove (username: string, target: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isPhomeSa(username)) { await this.reply(username, this.messages.text('phomeSaOnly'), source); return }
-    if (!target) { await this.reply(username, this.messages.text('phomeWlRemoveUsage'), source); return }
-    if (!this.isPhomeAllowed(target)) { await this.reply(username, this.messages.text('phomeWlNotFound', { target }), source); return }
-    this.db.prepare('DELETE FROM phome_whitelist WHERE game_name = ?').run(target)
-    await this.reply(username, this.messages.text('phomeWlRemoveSuccess', { target }), source)
-  }
-
-  private async _phomeWlListCmd (username: string, source: CommandSource): Promise<void> {
-    const rows = this.db.prepare('SELECT game_name FROM phome_whitelist WHERE level = ? ORDER BY game_name').all('wl') as Array<{ game_name: string }>
-    const list = rows.map(r => r.game_name).join(', ')
-    await this.reply(username, this.messages.text('phomeWlList', { list }), source)
-  }
-
-  private async _phomeSaAdd (username: string, target: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) { await this.reply(username, this.messages.text('noPermission'), source); return }
-    if (!target) { await this.reply(username, this.messages.text('phomeSaAddUsage'), source); return }
-    if (this.isPhomeSa(target)) { await this.reply(username, this.messages.text('phomeSaAlready', { target }), source); return }
-    this.db.prepare("INSERT INTO phome_whitelist (game_name, level) VALUES (?, 'sa') ON CONFLICT(game_name) DO UPDATE SET level = 'sa'").run(target)
-    await this.reply(username, this.messages.text('phomeSaAddSuccess', { target }), source)
-  }
-
-  private async _phomeSaRemove (username: string, target: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isAdmin(username)) { await this.reply(username, this.messages.text('noPermission'), source); return }
-    if (!target) { await this.reply(username, this.messages.text('phomeSaRemoveUsage'), source); return }
-    if (!this.isPhomeSa(target)) { await this.reply(username, this.messages.text('phomeSaNotFound', { target }), source); return }
-    this.db.prepare("UPDATE phome_whitelist SET level = 'wl' WHERE game_name = ? AND level = 'sa'").run(target)
-    await this.reply(username, this.messages.text('phomeSaRemoveSuccess', { target }), source)
-  }
-
-  private async _phomeSaList (username: string, source: CommandSource): Promise<void> {
-    const rows = this.db.prepare("SELECT game_name FROM phome_whitelist WHERE level = 'sa' ORDER BY game_name").all() as Array<{ game_name: string }>
-    const list = rows.map(r => r.game_name).join(', ')
-    await this.reply(username, this.messages.text('phomeSaList', { list }), source)
-  }
-
-  private async _phomePointAdd (username: string, parts: string[], source: CommandSource): Promise<void> {
-    if (!this.isPhomeSa(username)) { await this.reply(username, this.messages.text('phomeSaOnly'), source); return }
-    if (parts.length < 2) { await this.reply(username, this.messages.text('phomePointAddUsage'), source); return }
-    const noIdCmds = new Set(['/home', '/ts', '/tsl'])
-    const toPos = (s: string | undefined): number | undefined => {
-      const n = s ? parseInt(s, 10) : undefined
-      return n !== undefined && n > 0 ? n - 1 : undefined
-    }
-    const alias = parts[0]
-    let id: string | undefined
-    let cmd: string
-    let pos: number | undefined
-
-    if (parts.length >= 4) {
-      id = parts[1]
-      cmd = parts[2]
-      pos = toPos(parts[3])
-    } else if (parts.length === 3) {
-      if (noIdCmds.has(parts[1]) || /^\d+$/.test(parts[2])) {
-        cmd = parts[1]
-        pos = toPos(parts[2])
-      } else {
-        id = parts[1]
-        cmd = parts[2]
-      }
-    } else {
-      cmd = parts[1]
-    }
-
-    const result = this.teleportService.addPhomePoint(alias, id, cmd, pos)
-    await this.reply(username, result.message!, source)
-  }
-
-  private async _phomePointRemove (username: string, numStr: string | undefined, source: CommandSource): Promise<void> {
-    if (!this.isPhomeSa(username)) { await this.reply(username, this.messages.text('phomeSaOnly'), source); return }
-    if (!numStr) { await this.reply(username, this.messages.text('phomePointRemoveUsage'), source); return }
-    const num = parseInt(numStr, 10)
-    if (isNaN(num)) { await this.reply(username, this.messages.text('invalidNumber'), source); return }
-    const result = this.teleportService.removePhomePoint(num - 1)
-    await this.reply(username, result.message!, source)
   }
 
   private async _blacklistAdd (username: string, target: string | undefined, source: CommandSource): Promise<void> {
@@ -1888,17 +1498,23 @@ export default class CommandHandler {
   // 用法: 定时 <标签> <时长> | 定时 取消 <标签> | 定时 列表
   private async _timerCmd (username: string, parts: string[], source: CommandSource): Promise<void> {
     const sub = (parts.shift() || '').trim().toLowerCase()
-    if (sub === '取消' || sub === 'cancel') {
+    if (sub === '\u53d6\u6d88' || sub === 'cancel') {
       const label = (parts.shift() || '').trim()
       if (!label) {
         await this.reply(username, this.messages.text('timerCancelUsage'), source)
         return
       }
-      await this._timerCancel(username, label, source)
+      await this.reply(username, this.messages.text(
+        this.timerModule.cancel(username, label) ? 'timerCanceled' : 'timerCancelNotFound',
+        { label }
+      ), source)
       return
     }
-    if (sub === '列表' || sub === 'list') {
-      await this._timerList(username, source)
+    if (sub === '\u5217\u8868' || sub === 'list') {
+      const timers = this.timerModule.list(username)
+      await this.reply(username, timers.length === 0
+        ? this.messages.text('timerListEmpty')
+        : this.messages.text('timerList', { list: timers.map(timer => `${timer.label} (${timer.display})`).join(', ') }), source)
       return
     }
     const label = sub
@@ -1907,115 +1523,19 @@ export default class CommandHandler {
       return
     }
     const raw = (parts.shift() || '').trim()
-    const seconds = this.parseTimerDuration(raw)
-    if (seconds === null || seconds <= 0) {
-      await this.reply(username, this.messages.text('timerInvalid', { input: raw || '空' }), source)
+    const result = this.timerModule.start(username, label, raw)
+    if (result.status === 'invalid') {
+      await this.reply(username, this.messages.text('timerInvalid', { input: result.input || '\u7a7a' }), source)
       return
     }
-    if (seconds > 200 * 1200) {
+    if (result.status === 'too_long') {
       await this.reply(username, this.messages.text('timerTooLong'), source)
       return
     }
-    // 显示沿用用户原始输入（如 "5天"、"1小时30分钟"），不重新格式化，避免 5天→1小时40分钟 这类错位
-    const display = raw.trim().toLowerCase().replace(/\s+/g, '')
-    const replaced = this.startTimer(username, label, seconds, display)
-    await this.reply(username, this.messages.text(replaced ? 'timerReplaced' : 'timerStarted', { label, display }), source)
-  }
-
-  private timerKey (username: string, label: string): string {
-    return `${username.toLowerCase()}::${label.toLowerCase()}`
-  }
-
-  /** 解析时长：支持 秒/s、分/分钟/m、小时/h、游戏日；游戏日按 MC 游戏日（1游戏日=20分钟），可组合如 "1小时30分钟"、"90m"；不再支持 天/d */
-  private parseTimerDuration (raw: string): number | null {
-    const value = raw.trim().toLowerCase().replace(/\s+/g, '')
-    if (!value) return null
-    const units: Record<string, number> = {
-      '秒': 1, 's': 1,
-      '分': 60, '分钟': 60, 'm': 60,
-      '小时': 3600, 'h': 3600,
-      '游戏日': 1200
-    }
-    // 注意：不提供 '天'/'d'，避免与游戏日混淆；天/天缩写一律按无效时长处理
-    const pattern = /(\d+(?:\.\d+)?)([a-z一-龥]+)/g
-    let total = 0
-    let cursor = 0
-    let matched = false
-    let m: RegExpExecArray | null
-    while ((m = pattern.exec(value)) !== null) {
-      if (m.index !== cursor) return null // 中间有非法字符
-      const mult = units[m[2]]
-      if (mult === undefined) return null
-      total += Number(m[1]) * mult
-      cursor = pattern.lastIndex
-      matched = true
-    }
-    if (!matched || cursor !== value.length) return null
-    return total
-  }
-
-  private formatTimerDuration (seconds: number): string {
-    if (seconds >= 86400) {
-      const d = seconds / 86400
-      return `${d % 1 === 0 ? d : d.toFixed(1)}天`
-    }
-    if (seconds >= 3600) {
-      const h = Math.floor(seconds / 3600)
-      const m = Math.round((seconds % 3600) / 60)
-      return m > 0 ? `${h}小时${m}分钟` : `${h}小时`
-    }
-    if (seconds >= 60) {
-      const m = Math.floor(seconds / 60)
-      const s = seconds % 60
-      return s > 0 ? `${m}分钟${s}秒` : `${m}分钟`
-    }
-    return `${seconds}秒`
-  }
-
-  /** 返回是否覆盖了旧定时（同玩家同标签已存在） */
-  private startTimer (username: string, label: string, seconds: number, display?: string): boolean {
-    const key = this.timerKey(username, label)
-    const existing = this.timers.get(key)
-    const replaced = existing !== undefined
-    if (existing) clearTimeout(existing.handle)
-    const shown = display ?? this.formatTimerDuration(seconds)
-    const handle = setTimeout(() => {
-      this.timers.delete(key)
-      const msg = this.messages.text('timerDone', { label, display: shown })
-      try { this.mcBot.whisper(username, msg) } catch { /* 私信失败静默 */ }
-    }, seconds * 1000)
-    this.timers.set(key, { username, label, finishAt: Date.now() + seconds * 1000, display: shown, handle })
-    return replaced
-  }
-
-  private async _timerCancel (username: string, label: string, source: CommandSource): Promise<void> {
-    const key = this.timerKey(username, label)
-    const t = this.timers.get(key)
-    if (!t) {
-      await this.reply(username, this.messages.text('timerCancelNotFound', { label }), source)
-      return
-    }
-    clearTimeout(t.handle)
-    this.timers.delete(key)
-    await this.reply(username, this.messages.text('timerCanceled', { label }), source)
-  }
-
-  private async _timerList (username: string, source: CommandSource): Promise<void> {
-    const mine = [...this.timers.values()]
-      .filter(t => t.username.toLowerCase() === username.toLowerCase())
-      .sort((a, b) => a.finishAt - b.finishAt)
-    if (mine.length === 0) {
-      await this.reply(username, this.messages.text('timerListEmpty'), source)
-      return
-    }
-    const lines = mine.map(t => `${t.label} (${t.display})`)
-    await this.reply(username, this.messages.text('timerList', { list: lines.join(', ') }), source)
-  }
-
-  /** 停止全部定时（重载/退出时调用，防止旧 handler 的倒计时幽灵私信） */
-  disposeTimers (): void {
-    for (const t of this.timers.values()) clearTimeout(t.handle)
-    this.timers.clear()
+    await this.reply(username, this.messages.text(
+      result.replaced ? 'timerReplaced' : 'timerStarted',
+      { label, display: result.display }
+    ), source)
   }
 
   private async _enchantInfo (username: string, query: string, source: CommandSource): Promise<void> {
@@ -2042,36 +1562,13 @@ export default class CommandHandler {
     await this.reply(username, lines.join('\n'), source)
   }
 
-  /**
-   * 终端重载：优先走 app 层注册的进程内软重启（拆模块 + 清 require.cache + 重建，保持窗口不断开进程），
-   * 未注册时退化为"以相同参数拉起新进程接管"。仅限终端使用。
-   */
-  private async _reloadBot (source: CommandSource): Promise<void> {
-    if (source !== 'console') {
-      await this.reply('console-admin', '重载 仅限终端使用', source)
-      return
-    }
-    if (reloadHook) {
-      await this.reply('console-admin', '正在重载 bot 脚本（进程内软重启，保持窗口）...', 'console')
-      setTimeout(() => { reloadHook?.() }, 300)
-      return
-    }
-    try {
-      const child = spawn(process.execPath, process.argv.slice(1), {
-        cwd: process.cwd(),
-        env: { ...process.env, YAMB_RELOAD: '1' },
-        stdio: 'inherit'
-      })
-      child.unref()
-      await this.reply('console-admin', '正在重载 bot 脚本，新进程将自动接管...', 'console')
-      setTimeout(() => process.exit(0), 1000)
-    } catch (err) {
-      await this.reply('console-admin', `重载失败: ${(err as Error).message}`, 'console')
-    }
-  }
-
   private async _jumpCmd (username: string, parts: string[], source: CommandSource): Promise<void> {
     const arg = parts[0]
+    const isStop = arg === 'stop' || arg === '\u505c\u6b62'
+    if (this.hissModule.isActive() && !isStop) {
+      await this.reply(username, 'bot \u6b63\u5728\u54c8\u6c14\u8ffd\u51fb\uff0c\u8bf7\u5148\u4f7f\u7528 sp \u505c\u6b62\u54c8\u6c14\u3002', source)
+      return
+    }
     if (!arg || arg === '1') {
       await this.reply(username, this.jumpModule.startSingle(), source)
     } else if (arg === 'stop' || arg === '停止') {

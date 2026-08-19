@@ -74,6 +74,13 @@ export interface MessagesConfig {
   attackUsage?: string
   attackSuccess?: string
   attackError?: string
+  hissUsage?: string
+  hissWarn?: string
+  hissStarted?: string
+  hissStopped?: string
+  hissNotActive?: string
+  hissStaleCleared?: string
+  hissEnded?: string
   containerAddUsage?: string
   containerAddSuccess?: string
   containerRemoveUsage?: string
@@ -168,6 +175,9 @@ export interface MessagesConfig {
   brewStatusRunning?: string
   brewCancelRequested?: string
   brewStopped?: string
+  brewAgingStopped?: string
+  brewAgingIdle?: string
+  brewAgingStopNotFound?: string
   brewNotAllowed?: string
   brewWlAddUsage?: string
   brewWlAlready?: string
@@ -207,6 +217,7 @@ export interface MessagesConfig {
   nodeInfoLines?: string[]
   nodeNotInGroup?: string
   phomeRedirect?: string
+  phomePointNotFound?: string
   phomeDelegated?: string
   /** 无候选可代：同镇全被占/离线，带锁定人信息 */
   phomeBusyNoCandidates?: string
@@ -226,6 +237,7 @@ export interface WaypointConfig {
   id: string
   alias: string
   cmd?: string
+  owner?: string
 }
 
 export interface TeleportConfig {
@@ -236,7 +248,6 @@ export interface TeleportConfig {
   phomeCommand: string
   waypoints: WaypointConfig[]
   waypointDelayMs?: number
-  ownedIndices?: number[]
 }
 
 export interface BotBehaviorConfig {
@@ -246,7 +257,6 @@ export interface BotBehaviorConfig {
   afkCommand: string
   afkDelayMs: number
   homeWaitMs: number
-  replyDelayMs: number
   interactionDistance: number
   approachDistance: number
   forwardWaitMs: number
@@ -401,8 +411,8 @@ export interface ServiceResult {
   message?: string
   code?: 'locked' | 'not_ready' | 'unknown_waypoint'
     | 'bucket' | 'bottle'
-    | 'no_water' | 'no_item' | 'equip_fail' | 'too_far' | 'not_filled' | 'unsupported'
-    | 'barrel_full'
+    | 'no_water' | 'no_item' | 'equip_fail' | 'too_far' | 'not_filled' | 'unsupported' | 'break_active'
+    | 'barrel_full' | 'riding'
   lockedBy?: string | null
   /** 额外数据（供模板填充），例如装水的距离/物品名 */
   data?: Record<string, string | number>

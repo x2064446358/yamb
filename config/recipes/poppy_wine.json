@@ -1,0 +1,15 @@
+{
+  "id": "罂粟酒",
+  "fermentation": {
+    "duration": "8m",
+    "ingredients": {
+      "虞美人": 8,
+      "小麦": 2
+    }
+  },
+  "distillation": 2,
+  "aging": {
+    "days": 5,
+    "wood": "橡木"
+  }
+}

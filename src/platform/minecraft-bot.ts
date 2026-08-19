@@ -25,7 +25,6 @@ export default class MinecraftBot {
   bot: Bot | null = null
   isReady = false
   private acceptedResourcePacks = new Set<string>()
-  private reconnectAttempts = 0
   private readonly reconnectDelay = 20000
   private reconnectScheduled = false
   private stopped = false
@@ -35,9 +34,12 @@ export default class MinecraftBot {
   private currentViewDistance = 6
   private highViewRequests = 0
   private highViewTimer: ReturnType<typeof setTimeout> | null = null
+  private afkCommand = '/afk'
+  // The server does not expose AFK as a protocol field. Track only AFK
+  // toggles issued by this process and reset it whenever the connection ends.
+  private serverAfk = false
   /** 破基岩模式是否开启：开启时视距固定 breakViewDistance()，占住高位请求不回落 */
   private breakViewActive = false
-  private lastKeepAliveAt = 0
   private kaMonitor: ReturnType<typeof setInterval> | null = null
   // 关闭聊天签名：部分服务器(改过的 /msg 等命令)会让签名命令 argSigs=0 触发 chat_validation_failed。
   // 社区标准解法，环境变量 MC_DISABLE_CHAT_SIGNING=true 开启
@@ -50,6 +52,26 @@ export default class MinecraftBot {
 
   setMessageQueue (queue: MessageQueue): void {
     this.messageQueue = queue
+  }
+
+  setAfkCommand (command: string): void {
+    const normalized = command.trim()
+    if (normalized) this.afkCommand = normalized
+  }
+
+  isServerAfk (): boolean {
+    return this.serverAfk
+  }
+
+  setServerAfk (active: boolean, source = 'local'): void {
+    if (this.serverAfk === active) return
+    this.serverAfk = active
+    debug(`[AFK] State: ${active ? 'active' : 'inactive'} (${source})`)
+  }
+
+  /** Queue the configured AFK toggle and remember the state for this connection. */
+  sendAfk (): boolean {
+    return this.chat(this.afkCommand)
   }
 
   /** 重载时断开当前连接（不触发自动重连），随后可调用 create() 重建 */
@@ -65,6 +87,7 @@ export default class MinecraftBot {
       try { old.removeAllListeners() } catch { /* */ }
     }
     this.acceptedResourcePacks.clear()
+    this.setServerAfk(false, 'disconnect')
   }
 
   onSpawn (callback: (bot: MinecraftBot) => void): void {
@@ -78,6 +101,7 @@ export default class MinecraftBot {
       this.bot = null
     }
     this.stopped = false
+    this.setServerAfk(false, 'new connection')
     info('[MC] Creating bot...')
     const options = {
       host: this.config.host,
@@ -122,7 +146,6 @@ export default class MinecraftBot {
       info('[MC] Bot spawned in world')
       this.isReady = true
       this.reconnectScheduled = false
-      this.lastKeepAliveAt = Date.now()
       this._startKeepAliveMonitor()
       if (this.messageQueue) {
         this.messageQueue.setBot(this)
@@ -352,6 +375,14 @@ export default class MinecraftBot {
 
   chat (message: string): boolean {
     if (!this.isReady || !this.bot) return false
+    const normalized = message.trim()
+    if (normalized === this.afkCommand) {
+      this.setServerAfk(!this.serverAfk, 'AFK command queued')
+    } else if (normalized) {
+      // Any command/chat activity may make the server-side AFK plugin leave
+      // AFK. Do not keep suppressing food after the bot becomes active again.
+      this.setServerAfk(false, 'outgoing activity')
+    }
     if (this.messageQueue) {
       this.messageQueue.enqueue(message)
     } else {

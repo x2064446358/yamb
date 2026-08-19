@@ -47,15 +47,18 @@ function tuiWrite (s: string): void {
 
 // 跨 write 缓冲：stdout 的多个 write 可能把 emoji 等多字节字符切到两次调用里，
 // 直接各自 toString 会得到 U+FFFD。这里累积到行尾再按行解码。
-let routeBuf = ''
+let routeBuf = Buffer.alloc(0)
 
 function routeToUi (chunk: unknown, isErr: boolean): void {
-  routeBuf += typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf-8')
-  const parts = routeBuf.split('\n')
-  routeBuf = parts.pop() ?? ''
-  for (const line of parts) {
+  const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf-8') : Buffer.from(chunk as Uint8Array)
+  routeBuf = Buffer.concat([routeBuf, bytes])
+  let newline = routeBuf.indexOf(0x0A)
+  while (newline >= 0) {
+    const line = routeBuf.subarray(0, newline).toString('utf-8')
+    routeBuf = routeBuf.subarray(newline + 1)
     const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
     if (clean.trim()) addMsg(`${ts()}${isErr ? ' [ERROR]' : ''} ${clean}`)
+    newline = routeBuf.indexOf(0x0A)
   }
 }
 
@@ -90,6 +93,12 @@ const D  = '\x1b[2;37m'; const RST = '\x1b[0m'
 const S  = '\x1b[90m'   // dim gray
 const B  = '\x1b[1;34m' // blue
 
+// Keep the palette in the standard 16 ANSI colors for Windows Terminal,
+// classic cmd.exe, SSH sessions, and terminals without true-color support.
+const BORDER = '\x1b[36m'
+const BRAND = '\x1b[96m'
+const MUTED = '\x1b[90m'
+
 function ww (): number {
   // 留 1 列余量：Windows Terminal 的 columns 有时比实际可视区多 1（滚动条），
   // 满宽写到最后一列会让边角 ┓/┛ 换行丢失
@@ -98,11 +107,21 @@ function ww (): number {
 function wh (): number { return process.stdout.rows || 24 }
 function hL (n: number): string { return '━'.repeat(n) }
 function pad2 (n: number): string { return n.toString().padStart(2, '0') }
+function formatVital (value: number): string {
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
 function ts (): string {
   const d = new Date()
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
 }
 function stripA (s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, '') }
+
+// Terminal-only cleanup. Unsupported emoji may already have been decoded as
+// U+FFFD (�); remove both forms here without changing command input or logs.
+function stripTerminalEmoji (s: string): string {
+  return s.replace(/[\uFFFD\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}]/gu, '')
+}
 
 /** 字符是否为双格宽。只有"确定双格"的才按 2 格算：
  *  CJK/全角一定双格；代理对(emoji 等 >0xFFFF)在终端普遍双格。
@@ -132,12 +151,23 @@ function dw (s: string): number {
   return w
 }
 
+function prevCodePointIndex (text: string, index: number): number {
+  if (index <= 0) return 0
+  const code = text.charCodeAt(index - 1)
+  return code >= 0xDC00 && code <= 0xDFFF && index >= 2 ? index - 2 : index - 1
+}
+
+function nextCodePointIndex (text: string, index: number): number {
+  if (index >= text.length) return text.length
+  const code = text.charCodeAt(index)
+  return code >= 0xD800 && code <= 0xDBFF && index + 1 < text.length ? index + 2 : index + 1
+}
+
 function fmtMsg (line: string): { icon: string; color: string; text: string } {
   const clean = stripA(line)
-  const maxW = ww()
   // Detect type and replace text tag with icon + color
-  if (clean.includes('[whisper]'))       return { icon: '◀', color: P,  text: clean.replace('[whisper]', '').trim() }
-  if (clean.includes('[chat]'))          return { icon: '◉', color: W,  text: clean.replace('[chat]', '').trim() }
+  if (clean.includes('[whisper]'))       return { icon: '◀', color: P,  text: line.replace('[whisper]', '').trim() }
+  if (clean.includes('[chat]'))          return { icon: '◉', color: W,  text: line.replace('[chat]', '').trim() }
   if (clean.includes('[join]'))          return { icon: '✦', color: G,  text: clean.replace('[join]', '').trim() }
   if (clean.includes('[leave]'))         return { icon: '✖', color: R,  text: clean.replace('[leave]', '').trim() }
   if (clean.includes('[WARN]'))          return { icon: '▲', color: Y,  text: clean.replace('[WARN]', '').trim() }
@@ -175,16 +205,16 @@ function doRender (): void {
   const conn = ui.online ? `${G}在线${RST}` : `${D}断开${RST}`
   const upText = ui.uptime ? `${D}${ui.uptime}${RST}` : ''
   const pingText = ui.ping > 0 ? `${W}${ui.ping}ms${RST}` : ''
-  const hp = ui.health != null ? `${R}♥${ui.health}${RST}` : ''
-  const fp = ui.food != null ? `${Y}🍖${ui.food}${RST}` : ''
-  const posText = ui.pos ? `${C}[${ui.pos.x},${ui.pos.y},${ui.pos.z}]${RST}` : ''
+  const hp = ui.health != null ? `${R}♥ ${formatVital(ui.health)}${RST}` : ''
+  const fp = ui.food != null ? `${Y}🍖 ${formatVital(ui.food)}${RST}` : ''
+  const posText = ui.pos ? `${C}⌖ ${ui.pos.x},${ui.pos.y},${ui.pos.z}${RST}` : ''
   const dimText = ui.dimension ? `${B}${ui.dimension}${RST}` : ''
-  const vdText = ui.viewDistance != null ? `${P}视距${ui.viewDistance}${RST}` : ''
-  const queueText = ui.queueSize != null && ui.queueSize > 0 ? `${S}队列${ui.queueSize}${RST}` : ''
+  const vdText = ui.viewDistance != null ? `${P}视距 ${ui.viewDistance}${RST}` : ''
+  const queueText = ui.queueSize != null && ui.queueSize > 0 ? `${S}队列 ${ui.queueSize}${RST}` : ''
   const dayText = ui.dayTime ? `${P}${ui.dayTime}${RST}` : ''
-  const entityText = ui.entityCount != null ? `${S}实体${ui.entityCount}${RST}` : ''
-  const heapText = ui.heapUsed != null ? `${S}内存${ui.heapUsed}MB${RST}` : ''
-  const heldText = ui.heldItem ? `${W}手持:${ui.heldItem}${RST}` : ''
+  const entityText = ui.entityCount != null ? `${S}实体 ${ui.entityCount}${RST}` : ''
+  const heapText = ui.heapUsed != null ? `${S}内存 ${ui.heapUsed}MB${RST}` : ''
+  const heldText = ui.heldItem ? `${W}🎒 ${ui.heldItem}${RST}` : ''
   const st = ui.state ? `${Y}${ui.state}${RST}` : ''
 
   const maxContent = Math.max(10, inner - 1)
@@ -204,8 +234,8 @@ function doRender (): void {
 
   const headerRows: string[] = []
   const row1 = pack([
-    `${B}◈${RST}${W}${botName}${RST}`,
-    `${dot}${conn}`, pingText, upText
+    `${BRAND}@${RST} ${W}${botName}${RST} ${MUTED}YAMB${RST}`,
+    `${dot}${conn}`, pingText, upText, st
   ])
   headerRows.push(row1.text)
 
@@ -213,20 +243,20 @@ function doRender (): void {
   headerRows.push(row2.text)
 
   if (ui.brewDetail) {
-    const row3 = pack([`${Y}酿酒${RST}`, `${C}${ui.brewDetail}${RST}`])
-    headerRows.push(row3.text)
-  } else {
-    const row3 = pack([entityText, queueText, heapText, heldText, st])
+    const row3 = pack([`${Y}🧪 酿酒${RST}`, `${C}${ui.brewDetail}${RST}`])
     headerRows.push(row3.text)
   }
 
+  const row4 = pack([entityText, queueText, heapText, heldText])
+  headerRows.push(row4.text)
+
   const headerH = headerRows.length + 2
-  out.push(`${C}┏${hL(inner)}┓${RST}`)
+  out.push(`${BORDER}┏${hL(inner)}┓${RST}`)
   for (const row of headerRows) {
     const rw = dw(stripA(row))
-    out.push(`${C}┃${RST} ${row}${' '.repeat(Math.max(0, inner - 1 - rw))}${C}┃${RST}`)
+    out.push(`${BORDER}┃${RST} ${row}${' '.repeat(Math.max(0, inner - 1 - rw))}${BORDER}┃${RST}`)
   }
-  out.push(`${C}┗${hL(inner)}┛${RST}`)
+  out.push(`${BORDER}┗${hL(inner)}┛${RST}`)
 
   // Messages
   const total = msgLines.length
@@ -241,7 +271,12 @@ function doRender (): void {
     const timeStr = timeEnd > 0 ? line.slice(0, timeEnd) : ''
     const rest = timeEnd > 0 ? line.slice(timeEnd + 1) : line
     const f = fmtMsg(rest)
-    const row = ` ${S}${timeStr}${RST} ${f.color}${f.icon}${RST} ${f.color}${f.text}${RST}`
+    // Chat components carry their own ANSI segments. Do not wrap those
+    // segments in a single fallback color or the reset after each segment
+    // makes the remainder of the line fall back to one uniform color.
+    const displayText = stripTerminalEmoji(f.text)
+    const displayColor = /\x1b\[[0-9;]*m/.test(displayText) ? '' : f.color
+    const row = ` ${S}${timeStr}${RST} ${f.color}${f.icon}${RST} ${displayColor}${displayText}${RST}`
     // 不补空格：\x1b[K 会清掉行尾旧内容；避免 vLn(JS长度) 对中文算窄导致换行挤乱布局
     out.push(row)
   }
@@ -259,31 +294,35 @@ function doRender (): void {
 
   // Send box — always show, dimmed when paused
   const label = paused ? ' term ' : ' send '
-  out.push(`${C}┏${label}${'━'.repeat(Math.max(0, w - 2 - label.length))}┓${RST}`)
-  const inPrefix = paused ? `${C}┃${RST} ${Y}按 Enter 返回输入${RST} ${D}` : `${C}┃${RST} > ${W}`
+  out.push(`${BORDER}┏${MUTED}${label}${RST}${BORDER}${'━'.repeat(Math.max(0, w - 2 - label.length))}┓${RST}`)
+  const inPrefix = paused ? `${BORDER}┃${RST} ${Y}按 Enter 返回输入${RST} ${D}` : `${BORDER}┃${RST} ${BRAND}> ${W}`
   const inSuffix = `${RST}`
   const maxInW = Math.max(1, w - dw(stripA(inPrefix)) - 1)
 
   if (!paused) {
     let viewStart = 0
     let posW = 0
-    for (let i = inputPos - 1; i >= 0; i--) {
-      posW += dw(inputBuf[i])
-      if (posW >= maxInW) { viewStart = i + 1; break }
+    for (let i = inputPos; i > 0;) {
+      const start = prevCodePointIndex(inputBuf, i)
+      posW += dw(inputBuf.slice(start, i))
+      if (posW >= maxInW) { viewStart = i; break }
+      i = start
     }
     let visInput = ''
     let visW = 0
-    for (let i = viewStart; i < inputBuf.length; i++) {
-      const cw = dw(inputBuf[i])
+    for (let i = viewStart; i < inputBuf.length;) {
+      const next = nextCodePointIndex(inputBuf, i)
+      const cw = dw(inputBuf.slice(i, next))
       if (visW + cw > maxInW) break
-      visInput += inputBuf[i]
+      visInput += inputBuf.slice(i, next)
       visW += cw
+      i = next
     }
     const beforeCursor = inputBuf.slice(viewStart, inputPos)
     const cursorDW = dw(stripA(inPrefix)) + dw(beforeCursor)
     const inL = inPrefix + visInput + inSuffix
     out.push(inL + ' '.repeat(Math.max(0, w - dw(stripA(inL)))))
-    out.push(`${C}┗${hL(inner)}┛${RST}`)
+    out.push(`${BORDER}┗${hL(inner)}┛${RST}`)
     writeScreen(out)
     tuiWrite(`\x1b[${h - 1};${cursorDW + 1}H`)
     return
@@ -292,7 +331,7 @@ function doRender (): void {
   // Paused: show dimmed input area
   const pauseL = inPrefix + inSuffix
   out.push(pauseL + ' '.repeat(Math.max(0, w - dw(stripA(pauseL)))))
-  out.push(`${C}┗${hL(inner)}┛${RST}`)
+  out.push(`${BORDER}┗${hL(inner)}┛${RST}`)
   writeScreen(out)
 }
 
@@ -380,15 +419,21 @@ export function startConsoleUI (name: string, send: (msg: string) => void): void
             continue
           }
           // Cursor keys (both ANSI \x1b[ and SS3 \x1bO)
-          if (seq === '\x1b[D' || seq === '\x1bOD') { if (inputPos > 0) inputPos--; schedule(); continue }
-          if (seq === '\x1b[C' || seq === '\x1bOC') { if (inputPos < inputBuf.length) inputPos++; schedule(); continue }
+          if (seq === '\x1b[D' || seq === '\x1bOD') { inputPos = prevCodePointIndex(inputBuf, inputPos); schedule(); continue }
+          if (seq === '\x1b[C' || seq === '\x1bOC') { inputPos = nextCodePointIndex(inputBuf, inputPos); schedule(); continue }
           if (seq === '\x1b[A' || seq === '\x1bOA') { schedule(); continue } // Up — ignore
           if (seq === '\x1b[B' || seq === '\x1bOB') { schedule(); continue } // Down — ignore
           // Home / End
           if (seq === '\x1b[H' || seq === '\x1bOH' || seq === '\x1b[1~') { inputPos = 0; schedule(); continue }
           if (seq === '\x1b[F' || seq === '\x1bOF' || seq === '\x1b[4~') { inputPos = inputBuf.length; schedule(); continue }
           // Delete
-          if (seq === '\x1b[3~') { if (inputPos < inputBuf.length) { inputBuf = inputBuf.slice(0, inputPos) + inputBuf.slice(inputPos + 1); } schedule(); continue }
+          if (seq === '\x1b[3~') {
+            if (inputPos < inputBuf.length) {
+              inputBuf = inputBuf.slice(0, inputPos) + inputBuf.slice(nextCodePointIndex(inputBuf, inputPos))
+            }
+            schedule()
+            continue
+          }
           // PgUp / PgDn
           if (seq === '\x1b[5~') { scrollOff += Math.max(1, Math.floor(wh() / 2)); schedule(); continue }
           if (seq === '\x1b[6~') { scrollOff = Math.max(0, scrollOff - Math.floor(wh() / 2)); schedule(); continue }
@@ -422,11 +467,15 @@ export function startConsoleUI (name: string, send: (msg: string) => void): void
         schedule(); continue
       }
       if (ch === '\x7f' || ch === '\b') {
-        if (inputPos > 0) { inputBuf = inputBuf.slice(0, inputPos - 1) + inputBuf.slice(inputPos); inputPos-- }
+        if (inputPos > 0) {
+          const previous = prevCodePointIndex(inputBuf, inputPos)
+          inputBuf = inputBuf.slice(0, previous) + inputBuf.slice(inputPos)
+          inputPos = previous
+        }
         schedule(); continue
       }
       if (ch === '\t') { inputBuf = inputBuf.slice(0, inputPos) + '  ' + inputBuf.slice(inputPos); inputPos += 2; schedule(); continue }
-      if (ch >= ' ') { inputBuf = inputBuf.slice(0, inputPos) + ch + inputBuf.slice(inputPos); inputPos++; schedule() }
+      if (ch >= ' ') { inputBuf = inputBuf.slice(0, inputPos) + ch + inputBuf.slice(inputPos); inputPos += ch.length; schedule() }
     }
   }
 

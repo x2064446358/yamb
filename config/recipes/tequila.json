@@ -1,0 +1,14 @@
+{
+  "id": "龙舌兰",
+  "fermentation": {
+    "duration": "15m",
+    "ingredients": {
+      "仙人掌": 8
+    }
+  },
+  "distillation": 2,
+  "aging": {
+    "days": 12,
+    "wood": "白桦木"
+  }
+}

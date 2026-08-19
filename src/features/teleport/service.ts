@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import type { ServiceResult, TeleportConfig, WaypointConfig, PhomeTownsConfig } from '../../types'
+import type { ServiceResult, TeleportConfig, PhomeTownsConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type { DatabaseSync } from 'node:sqlite'
 import { jumpAndHover } from '../../actions/shared/entity-utils'
@@ -22,10 +22,8 @@ export default class TeleportService {
   private tpacceptCommand: string
   private tpdenyCommand: string
   private tpahereCommand: string
-  private phomeCommand: string
   private waypointByAlias: Map<string, { id: string; cmd: string }>
-  private waypointList: Array<{ id: string; alias: string; cmd: string }>
-  private waypointDelayMs: number
+  private waypointList: Array<{ id: string; alias: string; cmd: string; owner?: string }>
   private locked = false
   private lockedBy: string | null = null
   private lockedNote: string | null = null
@@ -42,17 +40,16 @@ export default class TeleportService {
   private _ownedIndices: number[] = []
   private _configPath = ''
 
-  // === 小镇委托映射（来自 phome_towns.json + 各 teleportN.json 的 ownedIndices） ===
+  // === 小镇委托映射（来自 phome_towns.json + 共享 teleport.json 的 owner） ===
   private _phomeTowns: PhomeTownsConfig | null = null
   private _mainBot = ''
   private _townOfBot: Map<string, string> = new Map()
-  private _botIndexOfBot: Map<string, number> = new Map()
-  /** 传送点下标 → 归属 bot 名（由各 teleport 配置的 ownedIndices 汇总） */
+  /** 传送点下标 → 归属 bot 名（来自共享 teleport.json 的 owner） */
   private _ownerOfIndex: Map<number, string> = new Map()
   /** 上次小镇映射签名；仅映射变化时输出日志，避免每 30s 刷新刷屏 */
   private _lastTownMapSig = ''
   private _myBotIndex = 0
-  private _configDir = ''
+  private commandPrefix = '%'
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private configRefreshTimer: ReturnType<typeof setInterval> | null = null
 
@@ -60,23 +57,26 @@ export default class TeleportService {
     this._configPath = p
   }
 
+  setCommandPrefix (prefix: string): void {
+    this.commandPrefix = prefix || '%'
+  }
+
   constructor (mcBot: MinecraftBot, config: TeleportConfig) {
     this.mcBot = mcBot
     this.tpacceptCommand = config.tpacceptCommand
     this.tpdenyCommand = config.tpdenyCommand
     this.tpahereCommand = config.tpahereCommand
-    this.phomeCommand = config.phomeCommand
     const waypoints = config.waypoints || []
     this.waypointList = waypoints.map(w => ({
       id: w.id,
       alias: w.alias || w.id,
-      cmd: w.cmd || '/phome'
+      cmd: w.cmd || '/phome',
+      owner: w.owner
     }))
-    this._ownedIndices = (config.ownedIndices ?? []).filter(i => i >= 0 && i < this.waypointList.length)
+    this.rebuildOwnedIndices()
     this.waypointByAlias = new Map(
       this.waypointList.map(w => [w.alias, { id: w.id, cmd: w.cmd }])
     )
-    this.waypointDelayMs = config.waypointDelayMs ?? 3000
     this.startLockTimer()
   }
 
@@ -127,6 +127,7 @@ export default class TeleportService {
   setDb(db: DatabaseSync, botName: string): void {
     this._db = db
     this._botName = botName
+    this.rebuildOwnedIndices()
     this.restoreLockState()
     this.startHeartbeat()
   }
@@ -153,53 +154,47 @@ export default class TeleportService {
     return this._ownedIndices.includes(idx)
   }
 
+  /** Derive the current bot's owned points from the shared waypoint owner fields. */
+  private rebuildOwnedIndices(): void {
+    const botName = this._botName.toLowerCase()
+    this._ownedIndices = this.waypointList
+      .map((waypoint, index) => waypoint.owner?.toLowerCase() === botName ? index : -1)
+      .filter(index => index >= 0)
+  }
+
   // === 小镇委托 ===
 
   /**
    * 注入小镇配置并建立 下标→owner 映射（启动时）。
-   * owner 映射由各 teleport{index}.json 的 ownedIndices 汇总而来（单一事实来源），
-   * 因此每个 bot 进程启动时都会重新读一遍同目录下其他 bot 的配置；
-   * 之后每 30s 由 startConfigRefresh 定期重建，让运行中 加phome点 无需重启即生效。
+   * owner 映射来自共享 teleport.json（单一事实来源），
+   * 之后每 3s 由 startConfigRefresh 定期重建，让运行中 加phome点 无需重启即生效。
    */
-  setPhomeTowns(cfg: PhomeTownsConfig, configDir: string): void {
+  setPhomeTowns(cfg: PhomeTownsConfig): void {
     this._phomeTowns = cfg
     this._mainBot = cfg?.mainBot || ''
-    this._configDir = configDir
     this.rebuildTownMaps()
     this.startConfigRefresh()
   }
 
-  /** 重建 下标→owner 映射（启动时 + 定期刷新）。跳过读取失败/重复归属的 bot，其余照常生效 */
+  /** 重建 下标→owner 映射（启动时 + 定期刷新）。 */
   private rebuildTownMaps(): void {
     this._townOfBot.clear()
-    this._botIndexOfBot.clear()
     this._ownerOfIndex.clear()
+    this._myBotIndex = 0
     if (!this._phomeTowns?.bots) return
 
     for (const [name, info] of Object.entries(this._phomeTowns.bots)) {
       this._townOfBot.set(name, info.town)
-      this._botIndexOfBot.set(name, info.index)
       if (name.toLowerCase() === this._botName.toLowerCase()) {
         this._myBotIndex = info.index
       }
     }
 
-    for (const [name, info] of Object.entries(this._phomeTowns.bots)) {
-      const file = info.index === 1 ? 'teleport.json' : `teleport${info.index}.json`
-      const data = this.readConfigFile(path.join(this._configDir, file))
-      if (!data) {
-        warn(`[Teleport] 读取 ${file} 失败，${name} 的 /phome 点将无法被同镇 bot 委托`)
-        continue
-      }
-      const indices = (data.ownedIndices as number[] | undefined) ?? []
-      for (const idx of indices) {
-        if (this._ownerOfIndex.has(idx)) {
-          warn(`[Teleport] 重复归属 index ${idx}: ${this._ownerOfIndex.get(idx)} 与 ${name}`)
-          continue
-        }
-        this._ownerOfIndex.set(idx, name)
-      }
+    for (let idx = 0; idx < this.waypointList.length; idx++) {
+      const owner = this.waypointList[idx].owner?.trim()
+      if (owner) this._ownerOfIndex.set(idx, owner)
     }
+    this.rebuildOwnedIndices()
 
     // 只在映射内容变化时输出（启动/配置变更时提示一次），平时 30s 刷新静默
     const sig = `${this._mainBot}|${this._townOfBot.size}|${this._ownerOfIndex.size}|` +
@@ -246,10 +241,10 @@ export default class TeleportService {
     return this._botName
   }
 
-  /** 该点是否可由同小镇 bot 委托（只有 /phome 指令的点可以，/home、/ts 等不行） */
+  /** 该点是否可由同小镇 bot 委托（/phome 和 /ts 点可以，/home、/tsl 不可以） */
   isDelegatable(idx: number): boolean {
     const wp = this.getWaypointByIndex(idx)
-    // /ts 点小镇共享（同镇可代执行）；/home 点仅本人不可委托
+    // /home、/tsl 仍只能由归属 bot 响应；/ts 点允许同镇代执行。
     return !!wp && (wp.cmd === '/phome' || wp.cmd === '/ts')
   }
 
@@ -490,10 +485,6 @@ export default class TeleportService {
 
   // === Phome ===
 
-  listWaypointAliases(): string[] {
-    return this.waypointList.map(w => w.alias)
-  }
-
   listWaypoints(): Array<{ id: string; alias: string; cmd: string }> {
     return [...this.waypointList]
   }
@@ -607,7 +598,7 @@ export default class TeleportService {
     for (let i = 0; i < this.waypointList.length; i++) {
       // 主 bot 展示全部点；非主 bot 只列自己拥有的点
       if (!this.isMainBot() && !this._ownedIndices.includes(i)) continue
-      items.push(`%${i + 1}[${this.waypointList[i].alias}]`)
+      items.push(`${this.commandPrefix}${i + 1}[${this.waypointList[i].alias}]`)
     }
     const perLine = 6
     const lines: string[] = []
@@ -623,20 +614,28 @@ export default class TeleportService {
     const safeId = id || ''
     const existing = this.waypointList.findIndex(w => w.alias === alias)
     if (existing >= 0) {
+      const existingOwner = this.ownerOf(existing)
+      if (existingOwner && existingOwner.toLowerCase() !== this._botName.toLowerCase()) {
+        return { success: false, message: `传送点已存在，归属 ${existingOwner}。` }
+      }
+    }
+    if (existing >= 0) {
       // If this bot already owns the existing waypoint, just update it
       if (this._ownedIndices.includes(existing)) {
         this.waypointList[existing].id = safeId
         this.waypointList[existing].cmd = cm_d
+        this.waypointList[existing].owner = this._botName
         this.rebuildAliasMap()
-        this.saveOwnedIndices()
-        return { success: true, message: `已更新传送点: %${existing + 1}[${alias}]` }
+        this.rebuildTownMaps()
+        this.saveWaypoints()
+        return { success: true, message: `已更新传送点: ${this.commandPrefix}${existing + 1}[${alias}]` }
       }
       // Alias exists but owned by another bot — add as new entry for this bot
     }
-    const entry = { id: safeId, alias, cmd: cm_d }
+    const entry = { id: safeId, alias, cmd: cm_d, owner: this._botName }
     let idx: number
     if (pos !== undefined && pos >= 0 && pos <= this.waypointList.length) {
-      // 插入位置会使之后所有下标 +1，先平移 ownedIndices 再插入
+      // 插入位置会使之后所有下标 +1，先平移本地归属索引再插入
       this._ownedIndices = this._ownedIndices.map(i => i >= pos ? i + 1 : i)
       this.waypointList.splice(pos, 0, entry)
       idx = pos
@@ -645,9 +644,10 @@ export default class TeleportService {
       idx = this.waypointList.length - 1
     }
     this._ownedIndices.push(idx)
-    this.saveOwnedIndices()
+    this.saveWaypoints()
     this.rebuildAliasMap()
-    return { success: true, message: `已添加传送点: %${idx + 1}[${alias}]` }
+    this.rebuildTownMaps()
+    return { success: true, message: `已添加传送点: ${this.commandPrefix}${idx + 1}[${alias}]` }
   }
 
   removePhomePoint(idx: number): ServiceResult {
@@ -656,8 +656,9 @@ export default class TeleportService {
     if (!this.isOwned(idx)) return { success: false, message: '不能删除其他 bot 的传送点。' }
     const removed = this.waypointList.splice(idx, 1)[0]
     this._ownedIndices = this._ownedIndices.filter(i => i !== idx).map(i => i > idx ? i - 1 : i)
-    this.saveOwnedIndices()
+    this.saveWaypoints()
     this.rebuildAliasMap()
+    this.rebuildTownMaps()
     return { success: true, message: `已移除传送点: ${removed.alias}` }
   }
 
@@ -672,18 +673,24 @@ export default class TeleportService {
     if (!this._configPath) return
     const data = this.readConfigFile(this._configPath)
     if (!data) return
-    const rawWps = (data.waypoints as Array<{ id?: string; alias?: string; cmd?: string }> | undefined) ?? []
+    const rawWps = (data.waypoints as Array<{ id?: string; alias?: string; cmd?: string; owner?: string }> | undefined) ?? []
     this.waypointList = rawWps.map(w => ({
       id: w.id || '',
       alias: w.alias || w.id || '',
-      cmd: w.cmd || '/phome'
+      cmd: w.cmd || '/phome',
+      owner: typeof w.owner === 'string' ? w.owner.trim() || undefined : undefined
     }))
-    this._ownedIndices = ((data.ownedIndices as number[] | undefined) ?? [])
-      .filter(i => i >= 0 && i < this.waypointList.length)
+    this.rebuildOwnedIndices()
     this.rebuildAliasMap()
+    if (this._phomeTowns) this.rebuildTownMaps()
   }
 
   private readConfigFile(file: string): Record<string, unknown> | null {
+    // The shared teleport config may be edited while the bot is running.
+    if (!fs.existsSync(file)) {
+      debug(`[Teleport] 配置文件不存在，跳过: ${file}`)
+      return null
+    }
     try {
       const raw = fs.readFileSync(file, 'utf-8').replace(/^\uFEFF/, '')
       return JSON.parse(raw) as Record<string, unknown>
@@ -694,43 +701,45 @@ export default class TeleportService {
   }
 
   private writeConfigFile(file: string, data: Record<string, unknown>): void {
-    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf-8')
-  }
-
-  /** 其他 bot 的 ownedIndices 按 alias 重映射到共享列表的新下标 */
-  private remapOwned(oldIndices: number[], oldWps: WaypointConfig[], newWps: WaypointConfig[]): number[] {
-    const next: number[] = []
-    for (const i of oldIndices) {
-      const alias = oldWps[i]?.alias
-      if (!alias) continue
-      const idx = newWps.findIndex(w => w.alias === alias)
-      if (idx >= 0 && !next.includes(idx)) next.push(idx)
+    const tempFile = path.join(
+      path.dirname(file),
+      `.${path.basename(file)}.${process.pid}.tmp`
+    )
+    try {
+      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+      fs.renameSync(tempFile, file)
+    } finally {
+      if (fs.existsSync(tempFile)) {
+        try { fs.unlinkSync(tempFile) } catch { /* leave cleanup to the next save */ }
+      }
     }
-    return next
   }
 
-  private saveOwnedIndices(): void {
+  private saveWaypoints(): void {
     if (!this._configPath) return
     try {
-      const dir = path.dirname(this._configPath)
-      const files = fs.readdirSync(dir).filter(f => /^teleport.*\.json$/i.test(f))
-      const newWps = this.waypointList.map(w => ({ id: w.id, alias: w.alias, cmd: w.cmd }))
-      for (const f of files) {
-        const full = path.join(dir, f)
-        const data = this.readConfigFile(full)
-        if (!data) continue
-        const rawOldWps = (data.waypoints as Array<{ id?: string; alias?: string; cmd?: string }> | undefined) ?? []
-        const oldWps: WaypointConfig[] = rawOldWps.map(w => ({ id: w.id || '', alias: w.alias || w.id || '', cmd: w.cmd || '' }))
-        if (full === this._configPath) {
-          data.ownedIndices = this._ownedIndices
-        } else {
-          data.ownedIndices = this.remapOwned((data.ownedIndices as number[] | undefined) ?? [], oldWps, newWps)
-        }
-        data.waypoints = newWps
-        this.writeConfigFile(full, data)
-      }
+      const data = fs.existsSync(this._configPath)
+        ? this.readConfigFile(this._configPath)
+        : {
+            databaseFile: './data/md/mchatbot.db',
+            tpacceptCommand: '/tpaccept',
+            tpdenyCommand: '/tpdeny',
+            tpahereCommand: '/tpahere',
+            phomeCommand: '/phome',
+            waypointDelayMs: 3000
+          }
+      if (!data) return
+      // Remove the retired ownership format if an older run left it behind.
+      delete data.ownedIndices
+      data.waypoints = this.waypointList.map(w => ({
+        id: w.id,
+        alias: w.alias,
+        cmd: w.cmd,
+        ...(w.owner ? { owner: w.owner } : {})
+      }))
+      this.writeConfigFile(this._configPath, data)
     } catch (err) {
-      warn('[Teleport] Failed to save ownedIndices:', (err as Error).message)
+      warn('[Teleport] Failed to save teleport points:', (err as Error).message)
     }
   }
 }

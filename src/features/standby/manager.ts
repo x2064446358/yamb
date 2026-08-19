@@ -1,5 +1,6 @@
 import type { BotBehaviorConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
+import type { Bot } from 'mineflayer'
 import { eatGoldenCarrotsUntilFull } from './food'
 import { sleep } from '../../platform/sleep'
 import { error } from '../../platform/logger'
@@ -21,6 +22,8 @@ export default class StandbyManager {
   private checkTimer: ReturnType<typeof setInterval> | null = null
   private afkTimer: ReturnType<typeof setTimeout> | null = null
   private goingHome = false
+  private emergencyEating = false
+  private foodListenerBot: Bot | null = null
   private baseMinX = 0
   private baseMaxX = 0
   private baseMinZ = 0
@@ -31,6 +34,7 @@ export default class StandbyManager {
     this.idleTimeoutMs = config.idleTimeoutMs
     this.homeCommand = config.homeCommand
     this.afkCommand = config.afkCommand
+    this.mcBot.setAfkCommand(this.afkCommand)
     this.afkDelayMs = config.afkDelayMs
     this.homeWaitMs = config.homeWaitMs
     this.checkIntervalMs = config.idleCheckIntervalMs
@@ -65,9 +69,11 @@ export default class StandbyManager {
   }
 
   start (): void {
+    this.attachEmergencyFoodListener()
     if (this.checkTimer) return
     this.touch()
     this.checkTimer = setInterval(() => {
+      void this.checkEmergencyFood()
       void this.checkIdle()
     }, this.checkIntervalMs)
   }
@@ -81,28 +87,64 @@ export default class StandbyManager {
       clearTimeout(this.afkTimer)
       this.afkTimer = null
     }
+    this.foodListenerBot = null
   }
 
   touch (): void {
     this.lastActivity = Date.now()
+    if (this.afkTimer) {
+      clearTimeout(this.afkTimer)
+      this.afkTimer = null
+    }
   }
 
   scheduleAfk (): void {
+    if (this.mcBot.isServerAfk()) return
     if (this.afkTimer) clearTimeout(this.afkTimer)
     this.afkTimer = setTimeout(() => {
+      this.afkTimer = null
       if (this.ridingManager?.isActive()) return
       if (this.isBusy()) return
-      this.mcBot.chat(this.afkCommand)
+      if (this.mcBot.isServerAfk()) return
+      this.mcBot.sendAfk()
     }, this.afkDelayMs)
   }
 
   private async checkIdle (): Promise<void> {
-    if (!this.mcBot.isReady || this.goingHome) return
+    if (!this.mcBot.isReady || this.goingHome || this.emergencyEating) return
     if (this.ridingManager?.isActive()) return
     if (this.isLocked()) return
     if (this.isBusy()) return
     if (Date.now() - this.lastActivity < this.idleTimeoutMs) return
     await this.goHomeStandby()
+  }
+
+  /**
+   * Starvation takes priority over every normal activity. This intentionally
+   * does not consult lock, riding, or task state: surviving at zero food is
+   * more important than preserving the currently held item.
+   */
+  private async checkEmergencyFood (): Promise<void> {
+    const bot = this.mcBot.bot
+    if (!this.mcBot.isReady || !bot || this.emergencyEating) return
+    if (this.mcBot.isServerAfk()) return
+    if (typeof bot.food !== 'number' || bot.food >= 1) return
+
+    this.emergencyEating = true
+    try {
+      await eatGoldenCarrotsUntilFull(bot)
+    } catch (err) {
+      error('[Food] Emergency eating failed:', (err as Error).message)
+    } finally {
+      this.emergencyEating = false
+    }
+  }
+
+  private attachEmergencyFoodListener (): void {
+    const bot = this.mcBot.bot
+    if (!bot || this.foodListenerBot === bot) return
+    this.foodListenerBot = bot
+    bot.on('health', () => { void this.checkEmergencyFood() })
   }
 
   async goHomeStandby (): Promise<void> {

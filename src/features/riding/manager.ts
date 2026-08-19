@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { BotBehaviorConfig } from '../../types'
 import type MinecraftBot from '../../platform/minecraft-bot'
 import type PlayerInteractionService from '../../actions/player'
-import { debug, warn } from '../../platform/logger'
+import { debug } from '../../platform/logger'
 import {
   clearVehicleState,
   isMountedOnPlayer,
@@ -27,7 +27,7 @@ export default class RidingManager {
   private handlingDismount = false
   private notMountedStreak = 0
   private monitorTimer: ReturnType<typeof setInterval> | null = null
-  private listenersAttached = false
+  private listenerBot: Bot | null = null
   private db: DatabaseSync | null = null
   private botName = ''
   private isLocked: () => boolean = () => false
@@ -133,8 +133,9 @@ export default class RidingManager {
 
   start (): void {
     const bot = this.mcBot.bot
-    if (!bot || this.listenersAttached) return
-    this.listenersAttached = true
+    if (!bot) return
+    if (this.listenerBot === bot) return
+    this.listenerBot = bot
 
     bot.on('dismount', () => {
       void this.onDismountEvent()
@@ -157,9 +158,11 @@ export default class RidingManager {
       void this.handleInvoluntaryDismount()
     })
 
-    this.monitorTimer = setInterval(() => {
-      void this.checkMountedState()
-    }, this.checkIntervalMs)
+    if (!this.monitorTimer) {
+      this.monitorTimer = setInterval(() => {
+        void this.checkMountedState()
+      }, this.checkIntervalMs)
+    }
   }
 
   stop (): void {
@@ -167,7 +170,7 @@ export default class RidingManager {
       clearInterval(this.monitorTimer)
       this.monitorTimer = null
     }
-    this.listenersAttached = false
+    this.listenerBot = null
     this.clearMode()
   }
 
@@ -226,7 +229,7 @@ export default class RidingManager {
   }
 
   private async handlePlayerRemount (targetName: string): Promise<void> {
-    const bot = this.mcBot.bot
+    let bot = this.mcBot.bot
     if (!bot) {
       this.clearMode()
       return
@@ -244,6 +247,14 @@ export default class RidingManager {
       if (this.mode !== 'player' || this.targetPlayer !== targetName) {
         debug('[Riding] 用户已取消骑乘，停止重试')
         return
+      }
+      bot = this.mcBot.bot
+      if (!bot || !this.mcBot.isReady) {
+        if (attempt < 4) {
+          await sleep(1000)
+          continue
+        }
+        break
       }
       this.notMountedStreak = 0
 
@@ -263,7 +274,7 @@ export default class RidingManager {
         await sleep(3000)
         if (isMountedOnPlayer(bot, targetName)) {
           this.dismountRequested = false
-          this.mcBot.chat('/afk')
+          this.mcBot.sendAfk()
           return
         }
         debug(`[Riding] 稳定期间脱落，继续重试`)
@@ -331,7 +342,7 @@ export default class RidingManager {
         if (remounted) {
           debug(`[Riding] 重连骑乘 ${this.targetPlayer} 成功 (第 ${attempt} 次)`)
           this.dismountRequested = false
-          this.mcBot.chat('/afk')
+          this.mcBot.sendAfk()
           return
         }
         debug(`[Riding] 重连骑乘失败 (${attempt}/4)`)

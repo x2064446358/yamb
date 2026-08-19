@@ -1,0 +1,196 @@
+{
+  "databaseFile": "./data/md/mchatbot.db",
+  "tpacceptCommand": "/tpaccept",
+  "tpdenyCommand": "/tpdeny",
+  "tpahereCommand": "/tpahere",
+  "phomeCommand": "/phome",
+  "waypointDelayMs": 3000,
+  "waypoints": [
+    {
+      "id": "liang家",
+      "alias": "liang家",
+      "cmd": "/phome",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "刷花",
+      "alias": "全种类刷花",
+      "cmd": "/phome",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "渔场",
+      "alias": "渔场",
+      "cmd": "/phome",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "百万史莱姆收集",
+      "alias": "史莱姆",
+      "cmd": "/phome",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "鲫鱼本部",
+      "alias": "鲫鱼本部",
+      "cmd": "/ts",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "刷铁区块",
+      "alias": "超级刷铁机",
+      "cmd": "/home",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "72k刷冰机《阿梁激情建造》",
+      "alias": "刷冰机",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "平台多物品",
+      "alias": "平台",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "蜂厂",
+      "alias": "蜂厂",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "暖海平台",
+      "alias": "暖海",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "空置域收集",
+      "alias": "空置域",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "刷沙",
+      "alias": "刷沙",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "全物品",
+      "alias": "全物品",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "滴滴滴滴",
+      "alias": "合成站(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "船吸收集",
+      "alias": "船吸(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "猪人塔",
+      "alias": "猪人塔(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "刷沙",
+      "alias": "刷沙(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "多物品仓库",
+      "alias": "多物品仓库(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "贝贝场",
+      "alias": "潜影贝农场(结社)",
+      "cmd": "/phome",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "",
+      "alias": "地狱全怪",
+      "cmd": "/home",
+      "owner": "XieveYte"
+    },
+    {
+      "id": "",
+      "alias": "二连女巫",
+      "cmd": "/home",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "",
+      "alias": "510猪交",
+      "cmd": "/home",
+      "owner": "ama_lu_5"
+    },
+    {
+      "id": "9核壳厂",
+      "alias": "9核壳厂",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "",
+      "alias": "16核粘土机",
+      "cmd": "/home",
+      "owner": "ama_lu_7"
+    },
+    {
+      "id": "Y0猪人后面是到地狱端的传送门",
+      "alias": "Y0猪人",
+      "cmd": "/phome",
+      "owner": "ama_lu_1"
+    },
+    {
+      "id": "",
+      "alias": "试炼农场",
+      "cmd": "/home",
+      "owner": "YunCai123"
+    },
+    {
+      "id": "3840熔炉组",
+      "alias": "3840熔炉组",
+      "cmd": "/phome",
+      "owner": "XieveLte"
+    },
+    {
+      "id": "",
+      "alias": "卡兹戴尔基地",
+      "cmd": "/ts",
+      "owner": "ama_lu_7"
+    },
+    {
+      "id": "蘑菇岛建筑区",
+      "alias": "蘑菇岛建筑区",
+      "cmd": "/phome",
+      "owner": "ama_lu_7"
+    },
+    {
+      "id": "老旧工业区",
+      "alias": "老旧工业区",
+      "cmd": "/phome",
+      "owner": "ama_lu_7"
+    },
+    {
+      "id": "刷沙机",
+      "alias": "刷沙机(卡兹戴尔)",
+      "cmd": "/phome",
+      "owner": "ama_lu_7"
+    }
+  ]
+}

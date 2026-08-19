@@ -1,0 +1,9 @@
+{
+  "id": "铲子",
+  "fermentation": {
+    "duration": "13m",
+    "ingredients": {
+      "铲子": 1
+    }
+  }
+}

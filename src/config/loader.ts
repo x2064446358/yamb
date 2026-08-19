@@ -4,7 +4,6 @@ import { AGING_WOOD_TYPES, AGING_WOOD_ZH } from '../types'
 import type {
   AppConfig,
   MessagesConfig,
-  WaypointConfig,
   AgingWoodType,
   BrewRecipe,
   FermentationIngredient,
@@ -140,6 +139,7 @@ interface RawWaypoint {
   id: string
   alias: string
   cmd?: string
+  owner?: string
 }
 
 function normalizeWaypoints (raw: unknown): RawWaypoint[] {
@@ -157,7 +157,8 @@ function normalizeWaypoints (raw: unknown): RawWaypoint[] {
       const cmd = String(w.cmd || '').trim()
       if (!alias) continue
       const id = String(w.id || '').trim() || alias
-      waypoints.push({ id, alias, cmd: cmd || undefined })
+      const owner = String(w.owner || '').trim()
+      waypoints.push({ id, alias, cmd: cmd || undefined, owner: owner || undefined })
     }
   }
   return waypoints
@@ -301,7 +302,8 @@ function parseWaterMode (raw: unknown): BrewWaterMode {
 
 function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 'viewer' | 'brew' | 'botPhome' | 'botIdentity' | 'loopCmd' | 'phomeTowns'> {
   const commandPath = path.join(GAME_CONFIG_DIR, 'command.json')
-  const teleportConfigFile = process.env.BOT_TELEPORT_CONFIG || 'teleport.json'
+  // Phome points are shared by all bot processes; ownership lives on each waypoint.
+  const teleportConfigFile = 'teleport.json'
   const teleportPath = path.join(GAME_CONFIG_DIR, teleportConfigFile)
   const botPath = path.join(GAME_CONFIG_DIR, 'bot.json')
   const viewerPath = path.join(GAME_CONFIG_DIR, 'viewer.json')
@@ -344,7 +346,6 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       phomeCommand: teleportConfig.phomeCommand || '/phome',
       waypoints: normalizeWaypoints(rawWaypoints),
       waypointDelayMs: teleportConfig.waypointDelayMs ?? 3000,
-      ownedIndices: (teleportConfig as any).ownedIndices ?? undefined,
     },
     bot: {
       idleTimeoutMs: botConfig.idleTimeoutMs ?? 90000,
@@ -353,7 +354,6 @@ function loadFeatureConfig (): Pick<AppConfig, 'command' | 'teleport' | 'bot' | 
       afkCommand: botConfig.afkCommand || '/afk',
       afkDelayMs: botConfig.afkDelayMs ?? 500,
       homeWaitMs: botConfig.homeWaitMs ?? 3000,
-      replyDelayMs: botConfig.replyDelayMs ?? 500,
       interactionDistance: botConfig.interactionDistance ?? 3,
       approachDistance: botConfig.approachDistance ?? 10,
       forwardWaitMs: botConfig.forwardWaitMs ?? 2000,

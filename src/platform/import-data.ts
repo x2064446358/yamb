@@ -1,5 +1,4 @@
 import fs from 'fs'
-import path from 'path'
 import type { DatabaseSync } from 'node:sqlite'
 
 export function importWllbotData(db: DatabaseSync, dataFilePath: string): void {

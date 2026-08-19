@@ -33,6 +33,19 @@ export function initDatabase (dbPath: string): DatabaseSync {
       added_at  TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS blacklist (
+      game_name TEXT PRIMARY KEY,
+      added_by  TEXT NOT NULL,
+      added_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS phome_whitelist (
+      game_name TEXT PRIMARY KEY,
+      added_by  TEXT NOT NULL DEFAULT 'system',
+      level     TEXT NOT NULL DEFAULT 'wl',
+      added_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS brew_whitelist (
       game_name TEXT PRIMARY KEY,
       added_by  TEXT NOT NULL,
@@ -73,6 +86,19 @@ export function initDatabase (dbPath: string): DatabaseSync {
       -- 旧数据为 NULL，恢复时由首个 bot 原子认领
       bot_index   INTEGER
     );
+
+    /*
+    -- 待开始的酿酒队列。发酵已真正开始后转交给 brew_tasks 持久化恢复。
+    */
+    CREATE TABLE IF NOT EXISTS brew_queue (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      recipe_id   TEXT NOT NULL,
+      owner       TEXT NOT NULL,
+      bot_index   INTEGER NOT NULL,
+      queued_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_brew_queue_bot_order
+      ON brew_queue (bot_index, id);
 
     -- 公屏 %挂机 多 bot 原子认领：player+kind 主键，INSERT OR IGNORE 只有一方成功
     -- kind='claim' 表示某 bot 认领并正在执行 /tpa；kind='busy' 表示全部繁忙提示（去重）
